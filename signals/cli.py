@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 
 from model import Kronos, KronosTokenizer
 
+from .log import record_from_paths, write_record
 from .paths import PathForecaster
 from .report import format_report
 from .stats import compute_stats
@@ -56,6 +59,12 @@ def main(argv=None):
     p.add_argument("--max-context", type=int, default=512)
     p.add_argument("--device", default=None)
     p.add_argument("--verbose", action="store_true")
+    p.add_argument(
+        "--log-to",
+        default=None,
+        help="append this forecast (without outcome) to a JSONL log "
+             "for later calibration (see signals.fill_outcomes)",
+    )
     args = p.parse_args(argv)
 
     df = pd.read_csv(args.csv)
@@ -112,6 +121,20 @@ def main(argv=None):
         lookback_bars=args.lookback,
     )
     print(report)
+
+    if args.log_to:
+        rec = record_from_paths(
+            paths,
+            stats,
+            ts_generated=datetime.now(),
+            ts_history_end=pd.Timestamp(x_ts.iloc[-1]).to_pydatetime(),
+            ts_horizon_end=pd.Timestamp(y_ts.iloc[-1]).to_pydatetime(),
+            symbol=args.symbol,
+            timeframe=args.timeframe,
+            lookback=args.lookback,
+        )
+        write_record(Path(args.log_to), rec)
+        print(f"Logged forecast to {args.log_to}", file=sys.stderr)
 
 
 if __name__ == "__main__":

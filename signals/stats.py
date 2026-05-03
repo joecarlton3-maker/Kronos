@@ -1,11 +1,25 @@
 """Decision-support statistics computed from probabilistic forecast paths."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
+
+from .trajectory import (
+    DrawdownStats,
+    TimeToTouch,
+    TrajectoryBand,
+    drawdown_long,
+    drawdown_short,
+    per_bar_band,
+    time_to_touch,
+)
+
+
+# A level can be a bare price or a (label, price) tuple
+LevelInput = Union[float, Tuple[str, float]]
 
 
 @dataclass
@@ -13,6 +27,7 @@ class LevelTouch:
     level: float
     direction: str
     prob: float
+    label: str = ""
 
 
 @dataclass
@@ -58,20 +73,48 @@ class PathStats:
     rr_long: float
     rr_short: float
 
+    # Trajectory / drawdown / time-to-touch additions
+    trajectory_close: TrajectoryBand
+    trajectory_high: TrajectoryBand
+    trajectory_low: TrajectoryBand
+
+    drawdown_long: DrawdownStats
+    drawdown_short: DrawdownStats
+
+    time_to_target_long: TimeToTouch
+    time_to_stop_long: TimeToTouch
+    time_to_target_short: TimeToTouch
+    time_to_stop_short: TimeToTouch
+
+    level_time_to_touch: List[TimeToTouch] = field(default_factory=list)
+
+
+def _normalize_levels(
+    levels: Optional[Sequence[LevelInput]],
+) -> List[Tuple[str, float]]:
+    if not levels:
+        return []
+    out: List[Tuple[str, float]] = []
+    for lvl in levels:
+        if isinstance(lvl, (tuple, list)) and len(lvl) == 2:
+            out.append((str(lvl[0]), float(lvl[1])))
+        else:
+            out.append(("", float(lvl)))
+    return out
+
 
 def compute_stats(
     paths: np.ndarray,
     recent_df: pd.DataFrame,
-    levels: Optional[List[float]] = None,
+    levels: Optional[Sequence[LevelInput]] = None,
 ) -> PathStats:
     """
     Args:
         paths: (sample_count, pred_len, 6) — denormalized OHLCVA per path.
-        recent_df: input DataFrame used as context. Must include
-            'open', 'high', 'low', 'close'. ATR is computed from this.
-        levels: optional list of price levels to compute touch probability for.
+        recent_df: input DataFrame used as context for ATR.
+        levels: list of price levels — each a float or (label, price) tuple.
     """
-    levels = levels or []
+    levels_norm = _normalize_levels(levels)
     if paths.ndim != 3 or paths.shape[2] < 4:
         raise ValueError("paths must have shape (n_samples, pred_len, >=4)")
     n_samples, pred_len, _ = paths.shape
@@ -105,7 +148,9 @@ def compute_stats(
     terminal_std_pct = terminal_std / last_price * 100 if last_price else float("nan")
 
     atr_recent = _atr(recent_df, 14)
-    dispersion_in_atr = terminal_std / atr_recent if atr_recent > 0 else float("nan")
+    dispersion_in_atr = (
+        terminal_std / atr_recent if atr_recent > 0 else float("nan")
+    )
 
     shapes = [
         _classify_shape(closes[i], highs[i], lows[i]) for i in range(n_samples)
@@ -116,14 +161,18 @@ def compute_stats(
     }
 
     level_touches: List[LevelTouch] = []
-    for lvl in levels:
+    level_ttts: List[TimeToTouch] = []
+    for label, lvl in levels_norm:
         if lvl > last_price:
             prob = float((max_high_per_path >= lvl).mean())
             direction = "above"
         else:
             prob = float((min_low_per_path <= lvl).mean())
             direction = "below"
-        level_touches.append(LevelTouch(level=float(lvl), direction=direction, prob=prob))
+        level_touches.append(
+            LevelTouch(level=float(lvl), direction=direction, prob=prob, label=label)
+        )
+        level_ttts.append(time_to_touch(paths, lvl, last_price, label=label))
 
     stop_long = float(np.percentile(min_low_per_path, 15))
     target_long = float(np.percentile(max_high_per_path, 75))
@@ -136,6 +185,18 @@ def compute_stats(
     reward_short = max(last_price - target_short, 0.0)
     rr_long = reward_long / risk_long if risk_long > 0 else float("nan")
     rr_short = reward_short / risk_short if risk_short > 0 else float("nan")
+
+    trajectory_close = per_bar_band(closes)
+    trajectory_high = per_bar_band(highs)
+    trajectory_low = per_bar_band(lows)
+
+    dd_long = drawdown_long(paths, last_price)
+    dd_short = drawdown_short(paths, last_price)
+
+    ttt_target_long = time_to_touch(paths, target_long, last_price, "Suggested target (long)")
+    ttt_stop_long = time_to_touch(paths, stop_long, last_price, "Suggested stop (long)")
+    ttt_target_short = time_to_touch(paths, target_short, last_price, "Suggested target (short)")
+    ttt_stop_short = time_to_touch(paths, stop_short, last_price, "Suggested stop (short)")
 
     return PathStats(
         last_price=last_price,
@@ -171,6 +232,16 @@ def compute_stats(
         suggested_target_short=target_short,
         rr_long=rr_long,
         rr_short=rr_short,
+        trajectory_close=trajectory_close,
+        trajectory_high=trajectory_high,
+        trajectory_low=trajectory_low,
+        drawdown_long=dd_long,
+        drawdown_short=dd_short,
+        time_to_target_long=ttt_target_long,
+        time_to_stop_long=ttt_stop_long,
+        time_to_target_short=ttt_target_short,
+        time_to_stop_short=ttt_stop_short,
+        level_time_to_touch=level_ttts,
     )
 
 

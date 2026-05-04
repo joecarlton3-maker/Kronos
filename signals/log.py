@@ -32,6 +32,16 @@ class Outcome:
     short_first_touch: str
     realized_r_short: float
     level_actual_touches: List[bool] = field(default_factory=list)
+    # Realized drawdown (always >= 0). Default 0 for backwards compat.
+    realized_dd_long: float = 0.0
+    realized_dd_short: float = 0.0
+    # Bar index (1-based) of first touch; None if never touched.
+    bars_to_target_long: Optional[int] = None
+    bars_to_stop_long: Optional[int] = None
+    bars_to_target_short: Optional[int] = None
+    bars_to_stop_short: Optional[int] = None
+    # Per-level: bar index of first touch (parallel to level_actual_touches).
+    level_actual_bars_to_touch: List[Optional[int]] = field(default_factory=list)
 
 
 @dataclass

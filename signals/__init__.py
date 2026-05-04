@@ -3,6 +3,19 @@
 `PathForecaster` is imported lazily so that `signals.stats` / `signals.report`
 can be used without torch (e.g. when post-processing pre-computed paths).
 """
+from .confluence import (
+    ConfluenceResult,
+    TimeframeView,
+    format_confluence_report,
+    multi_timeframe_vote,
+)
+from .fetchers import (
+    BarFetcher,
+    CSVBarFetcher,
+    SubprocessBarFetcher,
+    TradingViewMCPFetcher,
+    make_fetcher,
+)
 from .levels import auto_key_levels
 from .plan import PlanEvaluation, evaluate_plan
 from .report import format_report
@@ -16,6 +29,7 @@ from .trajectory import (
     per_bar_band,
     time_to_touch,
 )
+from .watch import ChangeThresholds, MaterialChange, detect_material_change, watch_loop
 
 __all__ = [
     "PathForecaster",
@@ -33,6 +47,20 @@ __all__ = [
     "drawdown_long",
     "drawdown_short",
     "time_to_touch",
+    "BarFetcher",
+    "CSVBarFetcher",
+    "SubprocessBarFetcher",
+    "TradingViewMCPFetcher",
+    "make_fetcher",
+    "ConfluenceResult",
+    "TimeframeView",
+    "multi_timeframe_vote",
+    "format_confluence_report",
+    "ChangeThresholds",
+    "MaterialChange",
+    "detect_material_change",
+    "watch_loop",
+    "fan_chart",
 ]
 
 
@@ -41,4 +69,8 @@ def __getattr__(name):
         from .paths import PathForecaster
 
         return PathForecaster
+    if name == "fan_chart":
+        from .chart import fan_chart
+
+        return fan_chart
     raise AttributeError(f"module 'signals' has no attribute {name!r}")

@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from .log import Outcome, record_from_paths, write_record
-from .stats import compute_stats
+from .stats import _normalize_levels, compute_stats
 
 
 ForecasterFn = Callable[
@@ -46,25 +46,33 @@ def _evaluate_outcome(
     direction_up = actual_terminal_close > last_price
 
     long_first = "neither"
-    for h, l in zip(highs, lows):
-        hit_stop = l <= suggested_stop_long
-        hit_target = h >= suggested_target_long
-        if hit_stop:
-            long_first = "stop"
-            break
-        if hit_target:
-            long_first = "target"
+    bars_to_stop_long = None
+    bars_to_target_long = None
+    for i, (h, l) in enumerate(zip(highs, lows), start=1):
+        if bars_to_stop_long is None and l <= suggested_stop_long:
+            bars_to_stop_long = i
+            if long_first == "neither":
+                long_first = "stop"
+        if bars_to_target_long is None and h >= suggested_target_long:
+            bars_to_target_long = i
+            if long_first == "neither":
+                long_first = "target"
+        if bars_to_stop_long is not None and bars_to_target_long is not None:
             break
 
     short_first = "neither"
-    for h, l in zip(highs, lows):
-        hit_stop = h >= suggested_stop_short
-        hit_target = l <= suggested_target_short
-        if hit_stop:
-            short_first = "stop"
-            break
-        if hit_target:
-            short_first = "target"
+    bars_to_stop_short = None
+    bars_to_target_short = None
+    for i, (h, l) in enumerate(zip(highs, lows), start=1):
+        if bars_to_stop_short is None and h >= suggested_stop_short:
+            bars_to_stop_short = i
+            if short_first == "neither":
+                short_first = "stop"
+        if bars_to_target_short is None and l <= suggested_target_short:
+            bars_to_target_short = i
+            if short_first == "neither":
+                short_first = "target"
+        if bars_to_stop_short is not None and bars_to_target_short is not None:
             break
 
     risk_long = max(last_price - suggested_stop_long, 1e-9)
@@ -83,11 +91,29 @@ def _evaluate_outcome(
         r_short = (last_price - actual_terminal_close) / risk_short
 
     level_actual_touches: List[bool] = []
+    level_bars: List = []
     for lvl in levels:
         if lvl > last_price:
-            level_actual_touches.append(bool(actual_max_high >= lvl))
+            touched = bool(actual_max_high >= lvl)
+            first_bar = None
+            if touched:
+                for i, h in enumerate(highs, start=1):
+                    if h >= lvl:
+                        first_bar = i
+                        break
         else:
-            level_actual_touches.append(bool(actual_min_low <= lvl))
+            touched = bool(actual_min_low <= lvl)
+            first_bar = None
+            if touched:
+                for i, l in enumerate(lows, start=1):
+                    if l <= lvl:
+                        first_bar = i
+                        break
+        level_actual_touches.append(touched)
+        level_bars.append(first_bar)
+
+    realized_dd_long = max(last_price - actual_min_low, 0.0)
+    realized_dd_short = max(actual_max_high - last_price, 0.0)
 
     return Outcome(
         actual_terminal_close=actual_terminal_close,
@@ -103,6 +129,13 @@ def _evaluate_outcome(
         short_first_touch=short_first,
         realized_r_short=float(r_short),
         level_actual_touches=level_actual_touches,
+        realized_dd_long=float(realized_dd_long),
+        realized_dd_short=float(realized_dd_short),
+        bars_to_target_long=bars_to_target_long,
+        bars_to_stop_long=bars_to_stop_long,
+        bars_to_target_short=bars_to_target_short,
+        bars_to_stop_short=bars_to_stop_short,
+        level_actual_bars_to_touch=level_bars,
     )
 
 
@@ -161,6 +194,7 @@ def run_backtest(
         stats = compute_stats(paths, hist, levels=levels)
 
         last_price = float(hist["close"].iloc[-1])
+        plain_levels = [price for _, price in _normalize_levels(levels)]
         outcome = _evaluate_outcome(
             actual_bars=actual,
             last_price=last_price,
@@ -168,7 +202,7 @@ def run_backtest(
             suggested_target_long=stats.suggested_target_long,
             suggested_stop_short=stats.suggested_stop_short,
             suggested_target_short=stats.suggested_target_short,
-            levels=levels,
+            levels=plain_levels,
         )
 
         rec = record_from_paths(

@@ -9,7 +9,7 @@ import argparse
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 
@@ -27,6 +27,30 @@ class CalibBucket:
     n: int
     predicted_mean: float
     actual_rate: float
+
+
+@dataclass
+class DrawdownCalib:
+    side: str
+    predicted_median: float
+    predicted_p75: float
+    predicted_p90: float
+    realized_mean: float
+    rate_exceeded_p50: float    # target ~50%
+    rate_exceeded_p75: float    # target ~25%
+    rate_exceeded_p90: float    # target ~10%
+
+
+@dataclass
+class TimingCalib:
+    label: str
+    n_records: int
+    predicted_p_touch_mean: float
+    actual_touch_rate: float
+    n_actually_touched: int
+    median_bars_predicted: float    # mean of predicted median across forecasts
+    median_bars_actual: float       # NaN if no touches
+    bars_bias: float                # actual - predicted; positive = touches arrive later than predicted
 
 
 @dataclass
@@ -58,6 +82,11 @@ class CalibrationReport:
     short_avg_r: float
 
     level_calib: List[dict]
+
+    drawdown_long: Optional[DrawdownCalib] = None
+    drawdown_short: Optional[DrawdownCalib] = None
+    timing_calibs: List[TimingCalib] = None
+    level_timing_calibs: List[TimingCalib] = None
 
 
 def analyze(log_path: Path) -> CalibrationReport:
@@ -142,6 +171,11 @@ def analyze(log_path: Path) -> CalibrationReport:
     date_start = sorted_by_ts[0].ts_history_end
     date_end = sorted_by_ts[-1].ts_history_end
 
+    drawdown_long_calib = _drawdown_calib(records, side="long")
+    drawdown_short_calib = _drawdown_calib(records, side="short")
+    timing_calibs = _suggested_timing_calibs(records)
+    level_timing_calibs = _level_timing_calibs(records)
+
     return CalibrationReport(
         n_forecasts=len(records),
         horizon=records[0].horizon,
@@ -165,6 +199,129 @@ def analyze(log_path: Path) -> CalibrationReport:
         short_win_rate=short_win_rate,
         short_avg_r=short_avg_r,
         level_calib=level_calib,
+        drawdown_long=drawdown_long_calib,
+        drawdown_short=drawdown_short_calib,
+        timing_calibs=timing_calibs,
+        level_timing_calibs=level_timing_calibs,
+    )
+
+
+def _drawdown_calib(records, side: str) -> Optional[DrawdownCalib]:
+    """Compare predicted drawdown distribution to realized drawdown."""
+    pred_med, pred_p75, pred_p90, realized = [], [], [], []
+    for r in records:
+        dd_key = f"drawdown_{side}"
+        dd = r.stats.get(dd_key)
+        if dd is None:
+            continue
+        pred_med.append(dd["median"])
+        pred_p75.append(dd["p75"])
+        pred_p90.append(dd["p90"])
+        actual = (
+            r.outcome.realized_dd_long if side == "long"
+            else r.outcome.realized_dd_short
+        )
+        realized.append(actual)
+    if not pred_med:
+        return None
+    pred_med = np.array(pred_med)
+    pred_p75 = np.array(pred_p75)
+    pred_p90 = np.array(pred_p90)
+    realized = np.array(realized)
+    return DrawdownCalib(
+        side=side,
+        predicted_median=float(pred_med.mean()),
+        predicted_p75=float(pred_p75.mean()),
+        predicted_p90=float(pred_p90.mean()),
+        realized_mean=float(realized.mean()),
+        rate_exceeded_p50=float((realized > pred_med).mean()),
+        rate_exceeded_p75=float((realized > pred_p75).mean()),
+        rate_exceeded_p90=float((realized > pred_p90).mean()),
+    )
+
+
+def _suggested_timing_calibs(records) -> List[TimingCalib]:
+    """Calibration of predicted P_touch and median timing for the four
+    suggested levels (long/short stop/target)."""
+    out = []
+    for stat_key, outcome_attr, pretty in [
+        ("time_to_target_long", "bars_to_target_long", "Suggested target (long)"),
+        ("time_to_stop_long", "bars_to_stop_long", "Suggested stop (long)"),
+        ("time_to_target_short", "bars_to_target_short", "Suggested target (short)"),
+        ("time_to_stop_short", "bars_to_stop_short", "Suggested stop (short)"),
+    ]:
+        calib = _timing_calib_for(records, stat_key, outcome_attr, pretty)
+        if calib is not None:
+            out.append(calib)
+    return out
+
+
+def _level_timing_calibs(records) -> List[TimingCalib]:
+    """Calibration for each named key level."""
+    by_label: dict = {}
+    for r in records:
+        ttts = r.stats.get("level_time_to_touch", [])
+        bars_list = getattr(r.outcome, "level_actual_bars_to_touch", []) or []
+        for ttt, actual_bar in zip(ttts, bars_list):
+            label = ttt.get("label") or f"@{ttt.get('price', 0):.2f}"
+            entry = by_label.setdefault(label, {
+                "predicted_p": [], "predicted_med": [],
+                "actual_touched": [], "actual_bars": [],
+            })
+            entry["predicted_p"].append(ttt.get("p_touched", 0.0))
+            med = ttt.get("median_bars")
+            if med is not None:
+                entry["predicted_med"].append(med)
+            entry["actual_touched"].append(1 if actual_bar is not None else 0)
+            if actual_bar is not None:
+                entry["actual_bars"].append(actual_bar)
+    out = []
+    for label, e in by_label.items():
+        if not e["predicted_p"]:
+            continue
+        out.append(_finalize_timing(label, e))
+    return out
+
+
+def _timing_calib_for(records, stat_key, outcome_attr, label) -> Optional[TimingCalib]:
+    e = {"predicted_p": [], "predicted_med": [], "actual_touched": [], "actual_bars": []}
+    for r in records:
+        ttt = r.stats.get(stat_key)
+        if ttt is None:
+            continue
+        e["predicted_p"].append(ttt.get("p_touched", 0.0))
+        med = ttt.get("median_bars")
+        if med is not None:
+            e["predicted_med"].append(med)
+        actual = getattr(r.outcome, outcome_attr, None)
+        e["actual_touched"].append(1 if actual is not None else 0)
+        if actual is not None:
+            e["actual_bars"].append(actual)
+    if not e["predicted_p"]:
+        return None
+    return _finalize_timing(label, e)
+
+
+def _finalize_timing(label: str, e: dict) -> TimingCalib:
+    n_records = len(e["predicted_p"])
+    n_touched = int(sum(e["actual_touched"]))
+    pred_med_mean = float(np.mean(e["predicted_med"])) if e["predicted_med"] else float("nan")
+    actual_med = (
+        float(np.median(e["actual_bars"])) if e["actual_bars"] else float("nan")
+    )
+    if e["predicted_med"] and e["actual_bars"]:
+        bias = actual_med - pred_med_mean
+    else:
+        bias = float("nan")
+    return TimingCalib(
+        label=label,
+        n_records=n_records,
+        predicted_p_touch_mean=float(np.mean(e["predicted_p"])),
+        actual_touch_rate=n_touched / n_records if n_records else float("nan"),
+        n_actually_touched=n_touched,
+        median_bars_predicted=pred_med_mean,
+        median_bars_actual=actual_med,
+        bars_bias=bias,
     )
 
 
@@ -254,8 +411,50 @@ def format_calibration_report(rep: CalibrationReport) -> str:
                 f"  P_touch in [{b['lo']:.1f},{b['hi']:.1f}):  n={b['n']:>4}  predicted={b['predicted_mean']:.2f}  actual={b['actual_rate']:.2f}"
             )
         L.append("")
+    if rep.drawdown_long is not None or rep.drawdown_short is not None:
+        L += ["DRAWDOWN CALIBRATION (target rate in parens)", sub]
+        for dd in (rep.drawdown_long, rep.drawdown_short):
+            if dd is None:
+                continue
+            L.append(f"  {dd.side.upper()} entry @ last price:")
+            L.append(
+                f"    Predicted heat:  median={dd.predicted_median:.2f}  "
+                f"P75={dd.predicted_p75:.2f}  P90={dd.predicted_p90:.2f}"
+            )
+            L.append(f"    Realized mean:   {dd.realized_mean:.2f}")
+            L.append(
+                f"    Realized exceeded predicted median:  {dd.rate_exceeded_p50:.2%}  (target 50%)"
+            )
+            L.append(
+                f"    Realized exceeded predicted P75:     {dd.rate_exceeded_p75:.2%}  (target 25%)"
+            )
+            L.append(
+                f"    Realized exceeded predicted P90:     {dd.rate_exceeded_p90:.2%}  (target 10%)"
+            )
+        L.append("")
+    if rep.timing_calibs:
+        L += ["TIMING CALIBRATION (suggested stops/targets)", sub]
+        for tc in rep.timing_calibs:
+            L += _format_timing(tc)
+        L.append("")
+    if rep.level_timing_calibs:
+        L += ["TIMING CALIBRATION (key levels)", sub]
+        for tc in rep.level_timing_calibs:
+            L += _format_timing(tc)
+        L.append("")
     L += ["INTERPRETATION", sub] + _interpretation(rep) + [sep]
     return "\n".join(L)
+
+
+def _format_timing(tc: TimingCalib) -> List[str]:
+    rate_diff = tc.actual_touch_rate - tc.predicted_p_touch_mean
+    return [
+        f"  {tc.label}",
+        f"    n={tc.n_records}  predicted P_touch={tc.predicted_p_touch_mean:.2%}  "
+        f"actual={tc.actual_touch_rate:.2%}  ({rate_diff:+.2%})",
+        f"    predicted median bars={_fnum(tc.median_bars_predicted)}  "
+        f"actual={_fnum(tc.median_bars_actual)}  bias={_fnum(tc.bars_bias, sign=True)}",
+    ]
 
 
 def _pct(v: float) -> str:
@@ -300,6 +499,19 @@ def _interpretation(rep: CalibrationReport) -> List[str]:
         out.append("  - Upside excursion under-forecast: P75 exceeded too often. Targets too tight.")
     if rep.p10_low_realized > 0.18:
         out.append("  - Downside tail risk under-forecast: P10 stops hit too often.")
+    for dd in (rep.drawdown_long, rep.drawdown_short):
+        if dd is None:
+            continue
+        if dd.rate_exceeded_p90 > 0.20:
+            out.append(
+                f"  - {dd.side.upper()} drawdown tails under-forecast "
+                f"(P90 exceeded {dd.rate_exceeded_p90:.0%} vs 10% target). Heat is worse than model predicts."
+            )
+    for tc in rep.timing_calibs or []:
+        if not math.isnan(tc.bars_bias) and tc.bars_bias > 5:
+            out.append(
+                f"  - {tc.label}: touches arrive ~{tc.bars_bias:.0f} bars later than predicted on avg."
+            )
 
     if rep.n_forecasts < 50:
         out.append(f"  - Sample size {rep.n_forecasts} is small. Treat all numbers as preliminary.")

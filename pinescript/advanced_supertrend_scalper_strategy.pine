@@ -401,11 +401,11 @@ if barstate.islast
 // =============================================================================
 // Walk-Forward Metrics Table (bottom-left)
 // =============================================================================
-fmtPct(simple int wins, simple int n) =>
+fmtPct(int wins, int n) =>
     n == 0 ? "-" : str.tostring(100.0 * wins / n, "#.0") + "%"
-pf(simple float gProf, simple float gLoss) =>
+pf(float gProf, float gLoss) =>
     gLoss == 0.0 ? (gProf > 0.0 ? "Inf" : "-") : str.tostring(gProf / gLoss, "#.00")
-avg(simple float pnl, simple int n) =>
+avg(float pnl, int n) =>
     n == 0 ? "-" : str.tostring(pnl / n, "#.##")
 
 var table wf = table.new(position.bottom_left, 4, 7,

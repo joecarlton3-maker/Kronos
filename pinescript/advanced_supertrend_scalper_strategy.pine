@@ -5,9 +5,13 @@
 // Always-in Supertrend reversal with tick-based three-leg trade management:
 //   * Enter long on flip up, short on flip down (auto-reverse on next flip)
 //   * TP1 / TP2 / TP3 each take a configurable % off at +/- N ticks from entry
-//   * After TP1 fills, runner stop moves to entry +/- N ticks (BE buffer)
-//   * After TP2 fills, runner stop trails with the Supertrend line
-//     (capped at entry as a floor so it never moves backward)
+//   * After TP1 fills, runner stop logic is one of:
+//       - None        -> no hard stop, ride until TP2 or next Supertrend flip
+//       - Breakeven   -> stop at entry +/- buffer ticks
+//       - Tick Trail  -> stop at highest-high (long) / lowest-low (short)
+//                        offset by N ticks; ratchets in profit
+//   * After TP2 fills, runner stop trails with the Supertrend line, ratcheting
+//     against the post-TP1 stop so it never moves backward
 //   * If TP3 doesn't hit, the next Supertrend flip closes the runner
 //   * Optional RTH session window gates new entries
 // =============================================================================
@@ -50,12 +54,17 @@ tp3Ticks   = input.int(32, "TP3 Distance (ticks)",  minval=1, maxval=600, step=1
 tp3Pct     = input.int(34, "TP3 % of Position",     minval=1, maxval=98,  step=1, group=grpRisk,
      tooltip="The three TP percentages should sum to 100. The runner is the TP3 slice.")
 
-useBE      = input.bool(true, "Move Runner SL to Breakeven after TP1",            group=grpRisk)
+tp1StopMode = input.string("Breakeven", "Runner Stop after TP1",
+     options=["None", "Breakeven", "Tick Trail"],                                 group=grpRisk,
+     tooltip="What stop to apply to the runner once TP1 fills:\nNone = no hard stop, ride until TP2 or Supertrend flip.\nBreakeven = entry +/- buffer ticks.\nTick Trail = highest-high / lowest-low offset by N ticks; ratchets in profit.")
 beTicks    = input.int(1,  "Breakeven Buffer (ticks)", minval=0, maxval=50, step=1, group=grpRisk,
-     tooltip="Offset from entry. 0 = exact entry. Positive locks in N ticks of profit; covers commissions/slippage.")
+     tooltip="Used when Runner Stop = Breakeven. Offset from entry. 0 = exact entry. Positive locks in N ticks of profit.")
+trailTicks = input.int(8,  "Trail Distance (ticks)",   minval=1, maxval=200, step=1, group=grpRisk,
+     tooltip="Used when Runner Stop = Tick Trail. Stop = highest-high (long) / lowest-low (short) offset by this many ticks.")
+
 trailOnTp2 = input.bool(true, "Trail Runner SL with Supertrend after TP2",        group=grpRisk,
-     tooltip="When on, after TP2 fills the runner trails the Supertrend line (floored at entry so it never gives back BE).")
-showLevels = input.bool(true, "Show TP / BE Levels",                              group=grpRisk)
+     tooltip="When on, after TP2 fills the runner trails the Supertrend line, ratcheting against the post-TP1 stop so it never moves backward.")
+showLevels = input.bool(true, "Show TP / Stop Levels",                            group=grpRisk)
 levelLen   = input.int(20, "Level Line Bars",        minval=1, maxval=200, step=1, group=grpRisk)
 
 // -----------------------------------------------------------------------------
@@ -116,11 +125,12 @@ exitedRth = useSession and inRth[1] and not inRth   // first bar after the sessi
 // =============================================================================
 // Entries + tick-based 3-TP trade management
 // =============================================================================
-tickSize = syminfo.mintick
-tp1Dist  = tp1Ticks * tickSize
-tp2Dist  = tp2Ticks * tickSize
-tp3Dist  = tp3Ticks * tickSize
-beDist   = beTicks  * tickSize
+tickSize   = syminfo.mintick
+tp1Dist    = tp1Ticks    * tickSize
+tp2Dist    = tp2Ticks    * tickSize
+tp3Dist    = tp3Ticks    * tickSize
+beDist     = beTicks     * tickSize
+trailDist  = trailTicks  * tickSize
 
 var float entryPx = na
 var float tp1Px   = na
@@ -156,6 +166,20 @@ if newShort
     tp3Hit  := false
     strategy.entry("Short", strategy.short, comment="Short")
 
+// Track highest-high / lowest-low since position opened (for tick trail).
+var float runHi = na
+var float runLo = na
+posJustOpened = strategy.position_size != 0 and strategy.position_size[1] == 0
+if posJustOpened
+    runHi := high
+    runLo := low
+else if strategy.position_size != 0
+    runHi := math.max(nz(runHi, high), high)
+    runLo := math.min(nz(runLo, low),  low)
+else
+    runHi := na
+    runLo := na
+
 // Detect TP fills intrabar so we can advance the runner stop.
 if strategy.position_size > 0
     if high >= tp1Px
@@ -176,12 +200,18 @@ if strategy.position_size == 0
     tp2Hit := false
     tp3Hit := false
 
-// Stop progression for the runner:
-//   Pre-TP1: na  -> no hard stop, Supertrend reversal handles it
-//   Post-TP1: bePx (entry +/- buffer)
-//   Post-TP2: trail with Supertrend, floored/capped at entry so BE never gives back
-longStop  = trailOnTp2 and tp2Hit ? math.max(stLine, entryPx) : useBE and tp1Hit ? bePx : na
-shortStop = trailOnTp2 and tp2Hit ? math.min(stLine, entryPx) : useBE and tp1Hit ? bePx : na
+// Post-TP1 runner stop (mode-dependent). 'na' means no hard stop yet.
+trailLongPx     = na(runHi) ? na : runHi - trailDist
+trailShortPx    = na(runLo) ? na : runLo + trailDist
+postTp1LongStop  = tp1Hit and tp1StopMode == "Breakeven"  ? bePx        : tp1Hit and tp1StopMode == "Tick Trail" ? trailLongPx  : na
+postTp1ShortStop = tp1Hit and tp1StopMode == "Breakeven"  ? bePx        : tp1Hit and tp1StopMode == "Tick Trail" ? trailShortPx : na
+
+// Post-TP2: Supertrend trail, ratcheting against the post-TP1 stop so it
+// can only move in our favor (never gives back locked-in protection).
+trailLongFloor   = na(postTp1LongStop)  ? entryPx : postTp1LongStop
+trailShortFloor  = na(postTp1ShortStop) ? entryPx : postTp1ShortStop
+longStop  = trailOnTp2 and tp2Hit ? math.max(stLine, trailLongFloor)  : postTp1LongStop
+shortStop = trailOnTp2 and tp2Hit ? math.min(stLine, trailShortFloor) : postTp1ShortStop
 
 // Place the three bracket exits each bar. Pine treats already-filled exits as
 // no-ops and just refreshes the live ones with the current dynamic stop.
@@ -222,7 +252,8 @@ plotshape(showLabels and newShort, title="SHORT", style=shape.labeldown,
      location=location.abovebar, color=bearCol, textcolor=color.white,
      text="S", size=size.tiny)
 
-// TP1 / TP2 / TP3 / BE level lines (entry-time levels, redrawn per trade)
+// TP1 / TP2 / TP3 / BE level lines (entry-time, redrawn per trade).
+// BE line is only meaningful in Breakeven mode; skip it otherwise.
 var line tp1Line = na
 var line tp2Line = na
 var line tp3Line = na
@@ -242,7 +273,7 @@ if showLevels and (newLong or newShort)
     if useTp3
         tp3Line := line.new(bar_index, tp3Px, bar_index + levelLen, tp3Px,
              color=color.teal,   width=2, style=line.style_dotted)
-    if useBE
+    if tp1StopMode == "Breakeven"
         beLine  := line.new(bar_index, bePx,  bar_index + levelLen, bePx,
              color=color.yellow, width=1, style=line.style_dashed)
 

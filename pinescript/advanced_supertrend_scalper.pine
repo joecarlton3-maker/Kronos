@@ -52,11 +52,18 @@ useMinAtr  = input.bool(true,  "Min ATR% Filter (skip dead markets)", group=grpF
 minAtrPct  = input.float(0.05, "Min ATR % of Price",  minval=0.0, step=0.01, group=grpFlt)
 
 // -----------------------------------------------------------------------------
-// Inputs - Session Filter
+// Inputs - Session Filter (US Futures RTH focus)
 // -----------------------------------------------------------------------------
-grpSess = "Session Filter"
-useSession = input.bool(false, "Use Session Filter",      group=grpSess)
-sessTime   = input.session("0930-1600", "Allowed Session", group=grpSess)
+grpSess = "Session Filter (RTH)"
+useSession = input.bool(true, "Restrict to RTH Session", group=grpSess)
+// Default skips first 5 min (opening auction chaos) and last 5 min (closing auction).
+sessTime   = input.session("0935-1555", "Active RTH Window", group=grpSess,
+     tooltip="Default 0935-1555 ET = US Futures/Cash RTH minus 5-min open/close edges. Set to 0930-1600 for full RTH.")
+useLunch   = input.bool(true, "Skip Midday Lunch Lull", group=grpSess)
+lunchTime  = input.session("1200-1300", "Lunch Session to Exclude", group=grpSess,
+     tooltip="No new entries during this window. Set lower if your symbol has a different chop period.")
+sessTz     = input.string("America/New_York", "Session Timezone", group=grpSess,
+     options=["America/New_York", "America/Chicago", "Europe/London", "Asia/Tokyo", "exchange"])
 
 // -----------------------------------------------------------------------------
 // Inputs - Risk / Targets
@@ -130,7 +137,12 @@ rsiBullOk = not useRsi or rsiVal > rsiBull
 rsiBearOk = not useRsi or rsiVal < rsiBear
 volOk    = not useVol or volume > volMa * volMult
 atrOk    = not useMinAtr or atrPct >= minAtrPct
-sessOk   = not useSession or not na(time(timeframe.period, sessTime))
+
+// RTH session gating: must be inside the active RTH window AND outside the lunch window.
+tzArg     = sessTz == "exchange" ? syminfo.timezone : sessTz
+inRth     = not na(time(timeframe.period, sessTime,  tzArg))
+inLunch   = useLunch and not na(time(timeframe.period, lunchTime, tzArg))
+sessOk    = not useSession or (inRth and not inLunch)
 
 htfBull  = not useHTF or htfDir ==  1
 htfBear  = not useHTF or htfDir == -1
@@ -247,7 +259,7 @@ alertcondition(posDir == -1 and high >= slPx,                      title="Short 
 // =============================================================================
 // Diagnostic Table
 // =============================================================================
-var table info = table.new(position.top_right, 2, 6,
+var table info = table.new(position.top_right, 2, 7,
      bgcolor=color.new(color.black, 80), border_width=1)
 if barstate.islast
     table.cell(info, 0, 0, "Trend",      text_color=color.white)
@@ -265,6 +277,13 @@ if barstate.islast
     table.cell(info, 0, 4, "Vol x MA",   text_color=color.white)
     table.cell(info, 1, 4, str.tostring(volume / volMa, "#.##") + "x",
          text_color=volOk ? color.white : color.gray)
-    table.cell(info, 0, 5, "Position",   text_color=color.white)
-    table.cell(info, 1, 5, posDir ==  1 ? "LONG" : posDir == -1 ? "SHORT" : "FLAT",
+    sessTxt = not useSession ? "OFF" :
+              inLunch        ? "LUNCH" :
+              inRth          ? "RTH"  : "CLOSED"
+    sessClr = not useSession ? color.gray :
+              sessTxt == "RTH" ? bullCol : color.gray
+    table.cell(info, 0, 5, "Session",    text_color=color.white)
+    table.cell(info, 1, 5, sessTxt,      text_color=sessClr)
+    table.cell(info, 0, 6, "Position",   text_color=color.white)
+    table.cell(info, 1, 6, posDir ==  1 ? "LONG" : posDir == -1 ? "SHORT" : "FLAT",
          text_color=posDir == 1 ? bullCol : posDir == -1 ? bearCol : color.gray)

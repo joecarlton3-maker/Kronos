@@ -1,12 +1,15 @@
 //@version=5
 // =============================================================================
-// Supertrend Baseline Strategy (Always In + TP1 / Breakeven)
+// Supertrend Baseline Strategy (Always In + 3-TP Trade Management)
 // -----------------------------------------------------------------------------
-// Always-in Supertrend reversal with tick-based partial profit-take:
+// Always-in Supertrend reversal with tick-based three-leg trade management:
 //   * Enter long on flip up, short on flip down (auto-reverse on next flip)
-//   * TP1: take a configurable % of position off at +/- N ticks from entry
-//   * After TP1 fills, move stop on the runner to entry +/- N ticks (BE buffer)
-//   * Runner otherwise rides until the next Supertrend flip
+//   * TP1 / TP2 / TP3 each take a configurable % off at +/- N ticks from entry
+//   * After TP1 fills, runner stop moves to entry +/- N ticks (BE buffer)
+//   * After TP2 fills, runner stop trails with the Supertrend line
+//     (capped at entry as a floor so it never moves backward)
+//   * If TP3 doesn't hit, the next Supertrend flip closes the runner
+//   * Optional RTH session window gates new entries
 //
 // Optimizer-friendly: every numeric input has explicit minval/maxval/step.
 // IS/OOS metrics table preserved for backtest evaluation.
@@ -34,17 +37,28 @@ atrLen  = input.int(10,   "ATR Length",     minval=2,   maxval=50,  step=1,   gr
 atrMult = input.float(2.0, "ATR Multiplier", minval=0.5, maxval=5.0, step=0.1, group=grpST)
 
 // -----------------------------------------------------------------------------
-// Inputs - Targets & Stops (tick-based)
+// Inputs - Targets & Stops (tick-based, three legs)
 // -----------------------------------------------------------------------------
 grpRisk    = "Targets & Stops"
-useTp1     = input.bool(true, "Take Partial at TP1",                              group=grpRisk)
+useTp1     = input.bool(true, "Enable TP1",                                       group=grpRisk)
 tp1Ticks   = input.int(8,  "TP1 Distance (ticks)",  minval=1, maxval=200, step=1, group=grpRisk)
-tp1Pct     = input.int(50, "TP1 % of Position",     minval=1, maxval=99,  step=1, group=grpRisk,
-     tooltip="Portion of the entry size taken off at TP1. Remainder rides on a breakeven stop.")
+tp1Pct     = input.int(33, "TP1 % of Position",     minval=1, maxval=98,  step=1, group=grpRisk)
+
+useTp2     = input.bool(true, "Enable TP2",                                       group=grpRisk)
+tp2Ticks   = input.int(16, "TP2 Distance (ticks)",  minval=1, maxval=400, step=1, group=grpRisk)
+tp2Pct     = input.int(33, "TP2 % of Position",     minval=1, maxval=98,  step=1, group=grpRisk)
+
+useTp3     = input.bool(true, "Enable TP3",                                       group=grpRisk)
+tp3Ticks   = input.int(32, "TP3 Distance (ticks)",  minval=1, maxval=600, step=1, group=grpRisk)
+tp3Pct     = input.int(34, "TP3 % of Position",     minval=1, maxval=98,  step=1, group=grpRisk,
+     tooltip="The three TP percentages should sum to 100. The runner is the TP3 slice.")
+
 useBE      = input.bool(true, "Move Runner SL to Breakeven after TP1",            group=grpRisk)
 beTicks    = input.int(1,  "Breakeven Buffer (ticks)", minval=0, maxval=50, step=1, group=grpRisk,
-     tooltip="Offset from entry for the runner stop. 0 = exact entry. Positive locks in N ticks of profit; covers commissions/slippage.")
-showLevels = input.bool(true, "Show TP1 / BE Levels",                             group=grpRisk)
+     tooltip="Offset from entry. 0 = exact entry. Positive locks in N ticks of profit; covers commissions/slippage.")
+trailOnTp2 = input.bool(true, "Trail Runner SL with Supertrend after TP2",        group=grpRisk,
+     tooltip="When on, after TP2 fills the runner trails the Supertrend line (floored at entry so it never gives back BE).")
+showLevels = input.bool(true, "Show TP / BE Levels",                              group=grpRisk)
 levelLen   = input.int(20, "Level Line Bars",        minval=1, maxval=200, step=1, group=grpRisk)
 
 // -----------------------------------------------------------------------------
@@ -59,7 +73,7 @@ lunchTime  = input.session("1200-1300", "Lunch Session to Exclude",             
 sessTz     = input.string("America/New_York", "Session Timezone",                 group=grpSess,
      options=["America/New_York", "America/Chicago", "Europe/London", "Asia/Tokyo", "exchange"])
 flatAtClose = input.bool(true, "Flatten Position at Session Close",               group=grpSess,
-     tooltip="When on, any open position is closed when the bar exits the active session. Off = let the runner ride into after-hours until the next flip.")
+     tooltip="When on, any open position is closed when the bar exits the active session.")
 
 // -----------------------------------------------------------------------------
 // Inputs - Backtest Window (for IS/OOS attribution; not a signal filter)
@@ -121,16 +135,22 @@ sessOk    = not useSession or (inRth and not inLunch)
 exitedRth = useSession and inRth[1] and not inRth   // first bar after the session ends
 
 // =============================================================================
-// Entries + tick-based TP1 / Breakeven trade management
+// Entries + tick-based 3-TP trade management
 // =============================================================================
 tickSize = syminfo.mintick
 tp1Dist  = tp1Ticks * tickSize
+tp2Dist  = tp2Ticks * tickSize
+tp3Dist  = tp3Ticks * tickSize
 beDist   = beTicks  * tickSize
 
 var float entryPx = na
 var float tp1Px   = na
+var float tp2Px   = na
+var float tp3Px   = na
 var float bePx    = na
 var bool  tp1Hit  = false
+var bool  tp2Hit  = false
+var bool  tp3Hit  = false
 
 newLong  = flipUp and wfOk and sessOk
 newShort = flipDn and wfOk and sessOk
@@ -138,39 +158,69 @@ newShort = flipDn and wfOk and sessOk
 if newLong
     entryPx := close
     tp1Px   := close + tp1Dist
+    tp2Px   := close + tp2Dist
+    tp3Px   := close + tp3Dist
     bePx    := close + beDist
     tp1Hit  := false
+    tp2Hit  := false
+    tp3Hit  := false
     strategy.entry("Long",  strategy.long,  comment="Long")
 
 if newShort
     entryPx := close
     tp1Px   := close - tp1Dist
+    tp2Px   := close - tp2Dist
+    tp3Px   := close - tp3Dist
     bePx    := close - beDist
     tp1Hit  := false
+    tp2Hit  := false
+    tp3Hit  := false
     strategy.entry("Short", strategy.short, comment="Short")
 
-// Detect TP1 fills intrabar so we can switch the runner to a BE stop.
-if strategy.position_size > 0 and high >= tp1Px
-    tp1Hit := true
-if strategy.position_size < 0 and low  <= tp1Px
-    tp1Hit := true
+// Detect TP fills intrabar so we can advance the runner stop.
+if strategy.position_size > 0
+    if high >= tp1Px
+        tp1Hit := true
+    if high >= tp2Px
+        tp2Hit := true
+    if high >= tp3Px
+        tp3Hit := true
+if strategy.position_size < 0
+    if low <= tp1Px
+        tp1Hit := true
+    if low <= tp2Px
+        tp2Hit := true
+    if low <= tp3Px
+        tp3Hit := true
 if strategy.position_size == 0
     tp1Hit := false
+    tp2Hit := false
+    tp3Hit := false
 
-// Place exits.
-//   * Pre-TP1: limit-only partial at TP1 (no stop -> Supertrend handles reversal)
-//   * Post-TP1: stop-only on the runner at the breakeven price
+// Stop progression for the runner:
+//   Pre-TP1: na  -> no hard stop, Supertrend reversal handles it
+//   Post-TP1: bePx (entry +/- buffer)
+//   Post-TP2: trail with Supertrend, floored/capped at entry so BE never gives back
+longStop  = trailOnTp2 and tp2Hit ? math.max(stLine, entryPx) : useBE and tp1Hit ? bePx : na
+shortStop = trailOnTp2 and tp2Hit ? math.min(stLine, entryPx) : useBE and tp1Hit ? bePx : na
+
+// Place the three bracket exits each bar. Pine treats already-filled exits as
+// no-ops and just refreshes the live ones with the current dynamic stop.
 if strategy.position_size > 0
-    if tp1Hit and useBE
-        strategy.exit("BE",  from_entry="Long",  stop=bePx,  comment_loss="BE")
-    else if useTp1
-        strategy.exit("TP1", from_entry="Long",  qty_percent=tp1Pct, limit=tp1Px, comment_profit="TP1")
+    if useTp1
+        strategy.exit("X1", from_entry="Long", qty_percent=tp1Pct, limit=tp1Px, stop=longStop, comment_profit="TP1", comment_loss="Stop")
+    if useTp2
+        strategy.exit("X2", from_entry="Long", qty_percent=tp2Pct, limit=tp2Px, stop=longStop, comment_profit="TP2", comment_loss="Stop")
+    if useTp3
+        strategy.exit("X3", from_entry="Long", qty_percent=tp3Pct, limit=tp3Px, stop=longStop, comment_profit="TP3", comment_loss="Stop")
 
 if strategy.position_size < 0
-    if tp1Hit and useBE
-        strategy.exit("BE",  from_entry="Short", stop=bePx,  comment_loss="BE")
-    else if useTp1
-        strategy.exit("TP1", from_entry="Short", qty_percent=tp1Pct, limit=tp1Px, comment_profit="TP1")
+    if useTp1
+        strategy.exit("X1", from_entry="Short", qty_percent=tp1Pct, limit=tp1Px, stop=shortStop, comment_profit="TP1", comment_loss="Stop")
+    if useTp2
+        strategy.exit("X2", from_entry="Short", qty_percent=tp2Pct, limit=tp2Px, stop=shortStop, comment_profit="TP2", comment_loss="Stop")
+    if useTp3
+        strategy.exit("X3", from_entry="Short", qty_percent=tp3Pct, limit=tp3Px, stop=shortStop, comment_profit="TP3", comment_loss="Stop")
 
 // Flatten any open position when the active session ends.
 if flatAtClose and exitedRth and strategy.position_size != 0
@@ -235,20 +285,34 @@ plotshape(showLabels and newShort, title="SHORT", style=shape.labeldown,
 bgcolor(useWF and inIS  ? color.new(bullCol, 95)      : na, title="IS Tint")
 bgcolor(useWF and inOOS ? color.new(color.yellow, 95) : na, title="OOS Tint")
 
-// TP1 / BE level lines (entry-time levels, redrawn per trade)
+// TP1 / TP2 / TP3 / BE level lines (entry-time levels, redrawn per trade)
 var line tp1Line = na
+var line tp2Line = na
+var line tp3Line = na
 var line beLine  = na
 
 if showLevels and (newLong or newShort)
     line.delete(tp1Line)
+    line.delete(tp2Line)
+    line.delete(tp3Line)
     line.delete(beLine)
-    tp1Line := line.new(bar_index, tp1Px, bar_index + levelLen, tp1Px,
-         color=color.lime,   width=1, style=line.style_dotted)
-    beLine  := line.new(bar_index, bePx,  bar_index + levelLen, bePx,
-         color=color.yellow, width=1, style=line.style_dashed)
+    if useTp1
+        tp1Line := line.new(bar_index, tp1Px, bar_index + levelLen, tp1Px,
+             color=color.lime,   width=1, style=line.style_dotted)
+    if useTp2
+        tp2Line := line.new(bar_index, tp2Px, bar_index + levelLen, tp2Px,
+             color=color.green,  width=1, style=line.style_dotted)
+    if useTp3
+        tp3Line := line.new(bar_index, tp3Px, bar_index + levelLen, tp3Px,
+             color=color.teal,   width=2, style=line.style_dotted)
+    if useBE
+        beLine  := line.new(bar_index, bePx,  bar_index + levelLen, bePx,
+             color=color.yellow, width=1, style=line.style_dashed)
 
-// Active runner stop (only visible after TP1 has filled)
-plot(tp1Hit and useBE and strategy.position_size != 0 ? bePx : na, "Runner BE",
+// Active runner stop (visible only after it becomes non-na, i.e. post-TP1)
+plot(strategy.position_size > 0 ? longStop  : na, "Long Stop",
+     color=color.new(color.red, 30), style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size < 0 ? shortStop : na, "Short Stop",
      color=color.new(color.red, 30), style=plot.style_linebr, linewidth=2)
 
 // =============================================================================

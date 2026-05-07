@@ -8,8 +8,9 @@
 //   * After TP1 fills, runner stop logic is one of:
 //       - None        -> no hard stop, ride until TP2 or next Supertrend flip
 //       - Breakeven   -> stop at entry +/- buffer ticks
-//       - Tick Trail  -> stop at highest-high (long) / lowest-low (short)
-//                        offset by N ticks; ratchets in profit
+//       - Chandelier  -> stop at highest-high (long) / lowest-low (short)
+//                        offset by N x ATR; volatility-adaptive, ratchets
+//                        in profit, classic trend-rider trail
 //   * After TP2 fills, runner stop trails with the Supertrend line, ratcheting
 //     against the post-TP1 stop so it never moves backward
 //   * If TP3 doesn't hit, the next Supertrend flip closes the runner
@@ -54,13 +55,15 @@ tp3Ticks   = input.int(32, "TP3 Distance (ticks)",  minval=1, maxval=600, step=1
 tp3Pct     = input.int(34, "TP3 % of Position",     minval=1, maxval=98,  step=1, group=grpRisk,
      tooltip="The three TP percentages should sum to 100. The runner is the TP3 slice.")
 
-tp1StopMode = input.string("Breakeven", "Runner Stop after TP1",
-     options=["None", "Breakeven", "Tick Trail"],                                 group=grpRisk,
-     tooltip="What stop to apply to the runner once TP1 fills:\nNone = no hard stop, ride until TP2 or Supertrend flip.\nBreakeven = entry +/- buffer ticks.\nTick Trail = highest-high / lowest-low offset by N ticks; ratchets in profit.")
+tp1StopMode = input.string("None", "Runner Stop after TP1",
+     options=["None", "Breakeven", "Chandelier"],                                 group=grpRisk,
+     tooltip="What stop to apply to the runner once TP1 fills:\nNone = no hard stop, ride until TP2 or Supertrend flip.\nBreakeven = entry +/- buffer ticks.\nChandelier = highest-high / lowest-low offset by N x ATR; volatility-adaptive trail.")
 beTicks    = input.int(1,  "Breakeven Buffer (ticks)", minval=0, maxval=50, step=1, group=grpRisk,
      tooltip="Used when Runner Stop = Breakeven. Offset from entry. 0 = exact entry. Positive locks in N ticks of profit.")
-trailTicks = input.int(8,  "Trail Distance (ticks)",   minval=1, maxval=200, step=1, group=grpRisk,
-     tooltip="Used when Runner Stop = Tick Trail. Stop = highest-high (long) / lowest-low (short) offset by this many ticks.")
+chandLen   = input.int(14, "Chandelier ATR Length",    minval=2, maxval=50, step=1, group=grpRisk,
+     tooltip="Used when Runner Stop = Chandelier.")
+chandMult  = input.float(3.0, "Chandelier ATR Multiplier", minval=0.5, maxval=8.0, step=0.1, group=grpRisk,
+     tooltip="Used when Runner Stop = Chandelier. Stop = highest-high (long) / lowest-low (short) offset by this many ATRs.")
 
 trailOnTp2 = input.bool(true, "Trail Runner SL with Supertrend after TP2",        group=grpRisk,
      tooltip="When on, after TP2 fills the runner trails the Supertrend line, ratcheting against the post-TP1 stop so it never moves backward.")
@@ -126,11 +129,12 @@ exitedRth = useSession and inRth[1] and not inRth   // first bar after the sessi
 // Entries + tick-based 3-TP trade management
 // =============================================================================
 tickSize   = syminfo.mintick
-tp1Dist    = tp1Ticks    * tickSize
-tp2Dist    = tp2Ticks    * tickSize
-tp3Dist    = tp3Ticks    * tickSize
-beDist     = beTicks     * tickSize
-trailDist  = trailTicks  * tickSize
+tp1Dist    = tp1Ticks * tickSize
+tp2Dist    = tp2Ticks * tickSize
+tp3Dist    = tp3Ticks * tickSize
+beDist     = beTicks  * tickSize
+chandATR   = ta.atr(chandLen)
+chandDist  = chandMult * chandATR
 
 var float entryPx = na
 var float tp1Px   = na
@@ -201,10 +205,10 @@ if strategy.position_size == 0
     tp3Hit := false
 
 // Post-TP1 runner stop (mode-dependent). 'na' means no hard stop yet.
-trailLongPx     = na(runHi) ? na : runHi - trailDist
-trailShortPx    = na(runLo) ? na : runLo + trailDist
-postTp1LongStop  = tp1Hit and tp1StopMode == "Breakeven"  ? bePx        : tp1Hit and tp1StopMode == "Tick Trail" ? trailLongPx  : na
-postTp1ShortStop = tp1Hit and tp1StopMode == "Breakeven"  ? bePx        : tp1Hit and tp1StopMode == "Tick Trail" ? trailShortPx : na
+chandLongPx      = na(runHi) ? na : runHi - chandDist
+chandShortPx     = na(runLo) ? na : runLo + chandDist
+postTp1LongStop  = tp1Hit and tp1StopMode == "Breakeven" ? bePx : tp1Hit and tp1StopMode == "Chandelier" ? chandLongPx  : na
+postTp1ShortStop = tp1Hit and tp1StopMode == "Breakeven" ? bePx : tp1Hit and tp1StopMode == "Chandelier" ? chandShortPx : na
 
 // Post-TP2: Supertrend trail, ratcheting against the post-TP1 stop so it
 // can only move in our favor (never gives back locked-in protection).

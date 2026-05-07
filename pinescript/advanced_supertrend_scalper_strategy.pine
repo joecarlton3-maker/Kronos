@@ -1,6 +1,6 @@
 //@version=5
 // =============================================================================
-// Supertrend Baseline Strategy (Always In + 3-TP Trade Management)
+// Supertrend Strategy (Always In + 3-TP Trade Management)
 // -----------------------------------------------------------------------------
 // Always-in Supertrend reversal with tick-based three-leg trade management:
 //   * Enter long on flip up, short on flip down (auto-reverse on next flip)
@@ -10,12 +10,9 @@
 //     (capped at entry as a floor so it never moves backward)
 //   * If TP3 doesn't hit, the next Supertrend flip closes the runner
 //   * Optional RTH session window gates new entries
-//
-// Optimizer-friendly: every numeric input has explicit minval/maxval/step.
-// IS/OOS metrics table preserved for backtest evaluation.
 // =============================================================================
 
-strategy("Supertrend Baseline (Always In)", shorttitle="ST Baseline",
+strategy("Supertrend Strategy", shorttitle="ST Strat",
      overlay              = true,
      initial_capital      = 10000,
      default_qty_type     = strategy.percent_of_equity,
@@ -76,16 +73,6 @@ flatAtClose = input.bool(true, "Flatten Position at Session Close",             
      tooltip="When on, any open position is closed when the bar exits the active session.")
 
 // -----------------------------------------------------------------------------
-// Inputs - Backtest Window (for IS/OOS attribution; not a signal filter)
-// -----------------------------------------------------------------------------
-grpWF     = "Backtest Window"
-useWF     = input.bool(false, "Restrict Backtest to Date Range",                  group=grpWF)
-isStart   = input.time(timestamp("2023-01-01 00:00 -0500"), "In-Sample Start",    group=grpWF)
-isEnd     = input.time(timestamp("2024-06-30 23:59 -0500"), "In-Sample End / OOS Start", group=grpWF)
-oosEnd    = input.time(timestamp("2025-12-31 23:59 -0500"), "Out-of-Sample End",  group=grpWF)
-showWfTbl = input.bool(true,  "Show IS / OOS Metrics Table",                      group=grpWF)
-
-// -----------------------------------------------------------------------------
 // Inputs - Visuals
 // -----------------------------------------------------------------------------
 grpViz     = "Visuals"
@@ -119,14 +106,6 @@ supertrend(simple int len, simple float mult) =>
 flipUp = ta.change(dir) ==  2
 flipDn = ta.change(dir) == -2
 
-// =============================================================================
-// Backtest window (optional date scoping; no signal filters here)
-// =============================================================================
-inIS  = time >= isStart and time <  isEnd
-inOOS = time >= isEnd   and time <= oosEnd
-inAny = time >= isStart and time <= oosEnd
-wfOk  = not useWF or inAny
-
 // Session gate (RTH window with optional lunch exclusion)
 tzArg     = sessTz == "exchange" ? syminfo.timezone : sessTz
 inRth     = not na(time(timeframe.period, sessTime,  tzArg))
@@ -152,8 +131,8 @@ var bool  tp1Hit  = false
 var bool  tp2Hit  = false
 var bool  tp3Hit  = false
 
-newLong  = flipUp and wfOk and sessOk
-newShort = flipDn and wfOk and sessOk
+newLong  = flipUp and sessOk
+newShort = flipDn and sessOk
 
 if newLong
     entryPx := close
@@ -227,45 +206,6 @@ if flatAtClose and exitedRth and strategy.position_size != 0
     strategy.close_all(comment="Sess End")
 
 // =============================================================================
-// IS / OOS attribution (one row per closed sub-trade; partial fills count)
-// =============================================================================
-var int   isTrades  = 0
-var int   isWins    = 0
-var float isPnL     = 0.0
-var float isGProf   = 0.0
-var float isGLoss   = 0.0
-var int   oosTrades = 0
-var int   oosWins   = 0
-var float oosPnL    = 0.0
-var float oosGProf  = 0.0
-var float oosGLoss  = 0.0
-var int   lastClosed = 0
-
-if strategy.closedtrades > lastClosed
-    for i = lastClosed to strategy.closedtrades - 1
-        et    = strategy.closedtrades.entry_time(i)
-        pnl   = strategy.closedtrades.profit(i)
-        isOne  = et >= isStart and et <  isEnd
-        oosOne = et >= isEnd   and et <= oosEnd
-        if isOne
-            isTrades += 1
-            isPnL    += pnl
-            if pnl > 0
-                isWins  += 1
-                isGProf += pnl
-            else
-                isGLoss += -pnl
-        if oosOne
-            oosTrades += 1
-            oosPnL    += pnl
-            if pnl > 0
-                oosWins  += 1
-                oosGProf += pnl
-            else
-                oosGLoss += -pnl
-    lastClosed := strategy.closedtrades
-
-// =============================================================================
 // Plots
 // =============================================================================
 plot(showSTLine and dir ==  1 ? stLine : na, "ST Up",
@@ -281,9 +221,6 @@ plotshape(showLabels and newLong,  title="LONG",  style=shape.labelup,
 plotshape(showLabels and newShort, title="SHORT", style=shape.labeldown,
      location=location.abovebar, color=bearCol, textcolor=color.white,
      text="S", size=size.tiny)
-
-bgcolor(useWF and inIS  ? color.new(bullCol, 95)      : na, title="IS Tint")
-bgcolor(useWF and inOOS ? color.new(color.yellow, 95) : na, title="OOS Tint")
 
 // TP1 / TP2 / TP3 / BE level lines (entry-time levels, redrawn per trade)
 var line tp1Line = na
@@ -314,62 +251,3 @@ plot(strategy.position_size > 0 ? longStop  : na, "Long Stop",
      color=color.new(color.red, 30), style=plot.style_linebr, linewidth=2)
 plot(strategy.position_size < 0 ? shortStop : na, "Short Stop",
      color=color.new(color.red, 30), style=plot.style_linebr, linewidth=2)
-
-// =============================================================================
-// IS / OOS Metrics Table
-// =============================================================================
-fmtPct(int wins, int n) =>
-    n == 0 ? "-" : str.tostring(100.0 * wins / n, "#.0") + "%"
-pf(float gProf, float gLoss) =>
-    gLoss == 0.0 ? (gProf > 0.0 ? "Inf" : "-") : str.tostring(gProf / gLoss, "#.00")
-avg(float pnl, int n) =>
-    n == 0 ? "-" : str.tostring(pnl / n, "#.##")
-
-var table wf = table.new(position.bottom_left, 4, 7,
-     bgcolor=color.new(color.black, 80), border_width=1)
-if barstate.islast and showWfTbl
-    table.cell(wf, 0, 0, "Walk-Forward",  text_color=color.white,  bgcolor=color.new(color.gray, 60))
-    table.cell(wf, 1, 0, "IS",            text_color=bullCol,      bgcolor=color.new(color.gray, 60))
-    table.cell(wf, 2, 0, "OOS",           text_color=color.yellow, bgcolor=color.new(color.gray, 60))
-    table.cell(wf, 3, 0, "All",           text_color=color.white,  bgcolor=color.new(color.gray, 60))
-
-    allTrades = isTrades + oosTrades
-    allWins   = isWins   + oosWins
-    allPnL    = isPnL    + oosPnL
-    allGProf  = isGProf  + oosGProf
-    allGLoss  = isGLoss  + oosGLoss
-
-    table.cell(wf, 0, 1, "Trades",        text_color=color.white)
-    table.cell(wf, 1, 1, str.tostring(isTrades),   text_color=color.white)
-    table.cell(wf, 2, 1, str.tostring(oosTrades),  text_color=color.white)
-    table.cell(wf, 3, 1, str.tostring(allTrades),  text_color=color.white)
-
-    table.cell(wf, 0, 2, "Win %",         text_color=color.white)
-    table.cell(wf, 1, 2, fmtPct(isWins,  isTrades),  text_color=color.white)
-    table.cell(wf, 2, 2, fmtPct(oosWins, oosTrades), text_color=color.white)
-    table.cell(wf, 3, 2, fmtPct(allWins, allTrades), text_color=color.white)
-
-    table.cell(wf, 0, 3, "Net P&L",       text_color=color.white)
-    table.cell(wf, 1, 3, str.tostring(isPnL,  "#.##"),  text_color=isPnL  >= 0 ? bullCol : bearCol)
-    table.cell(wf, 2, 3, str.tostring(oosPnL, "#.##"),  text_color=oosPnL >= 0 ? bullCol : bearCol)
-    table.cell(wf, 3, 3, str.tostring(allPnL, "#.##"),  text_color=allPnL >= 0 ? bullCol : bearCol)
-
-    table.cell(wf, 0, 4, "Avg Trade",     text_color=color.white)
-    table.cell(wf, 1, 4, avg(isPnL,  isTrades),  text_color=color.white)
-    table.cell(wf, 2, 4, avg(oosPnL, oosTrades), text_color=color.white)
-    table.cell(wf, 3, 4, avg(allPnL, allTrades), text_color=color.white)
-
-    table.cell(wf, 0, 5, "Profit Factor", text_color=color.white)
-    table.cell(wf, 1, 5, pf(isGProf,  isGLoss),  text_color=color.white)
-    table.cell(wf, 2, 5, pf(oosGProf, oosGLoss), text_color=color.white)
-    table.cell(wf, 3, 5, pf(allGProf, allGLoss), text_color=color.white)
-
-    isAvg    = isTrades  == 0 ? 0.0 : isPnL  / isTrades
-    oosAvg   = oosTrades == 0 ? 0.0 : oosPnL / oosTrades
-    effRatio = isAvg <= 0.0 ? 0.0 : oosAvg / isAvg
-    eff      = isAvg <= 0.0 ? "-" : str.tostring(effRatio, "#.00")
-    effClr   = isAvg <= 0.0 ? color.gray : effRatio >= 0.7 ? bullCol : effRatio >= 0.3 ? color.yellow : bearCol
-    table.cell(wf, 0, 6, "OOS/IS Eff",    text_color=color.white)
-    table.cell(wf, 1, 6, "",              text_color=color.white)
-    table.cell(wf, 2, 6, "",              text_color=color.white)
-    table.cell(wf, 3, 6, eff,             text_color=effClr)

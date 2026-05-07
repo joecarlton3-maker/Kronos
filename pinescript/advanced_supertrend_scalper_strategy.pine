@@ -1,22 +1,16 @@
 //@version=5
 // =============================================================================
-// Advanced Supertrend Scalper - STRATEGY VERSION
+// Supertrend Baseline Strategy (Always In Position)
 // -----------------------------------------------------------------------------
-// Backtestable strategy with active trade management:
-//   * Partial exits: TP1 / TP2 / TP3 (configurable splits, default 33/33/34)
-//   * Move SL to breakeven after TP1 fills
-//   * Trail SL with Fast Supertrend after TP2 fills
-//   * EOD flatten (no overnight risk on intraday systems)
-//   * RTH session focus + lunch-lull skip + all filters from the indicator
-//   * Auto-reverse on opposite signal (pyramiding disabled)
+// Pure single-Supertrend reversal: long on flip up, short on flip down.
+// No filters, no SL/TP overlay - the Supertrend line IS the trailing exit.
+// Use this as the baseline backtest; layer filters on top later based on the
+// performance attribution shown in the IS/OOS table.
 //
-// Walk-forward / optimizer features:
-//   * Every numeric input has explicit minval/maxval/step search bounds
-//   * Backtest date range with In-Sample / Out-of-Sample / All mode
-//   * Live IS vs OOS metrics table (trades, win%, net P&L, avg trade, PF)
+// Optimizer-friendly: every numeric input has explicit minval/maxval/step.
 // =============================================================================
 
-strategy("Advanced Supertrend Scalper Strategy", shorttitle="AST Scalper Strat",
+strategy("Supertrend Baseline (Always In)", shorttitle="ST Baseline",
      overlay              = true,
      initial_capital      = 10000,
      default_qty_type     = strategy.percent_of_equity,
@@ -27,110 +21,37 @@ strategy("Advanced Supertrend Scalper Strategy", shorttitle="AST Scalper Strat",
      slippage             = 1,
      process_orders_on_close = true,
      calc_on_every_tick   = false,
-     max_lines_count      = 500,
-     max_labels_count     = 500,
      max_bars_back        = 2000)
 
 // -----------------------------------------------------------------------------
-// Inputs - Supertrend  (search bounds tuned for 1-15m intraday)
+// Inputs - Supertrend (the only signal source)
 // -----------------------------------------------------------------------------
-grpST = "Supertrend"
-fastLen   = input.int(10,   "Fast ATR Length",       minval=2,   maxval=50,  step=1,   group=grpST)
-fastMult  = input.float(2.0, "Fast ATR Multiplier",  minval=0.5, maxval=5.0, step=0.1, group=grpST)
-slowLen   = input.int(20,   "Slow ATR Length",       minval=5,   maxval=100, step=1,   group=grpST)
-slowMult  = input.float(3.0, "Slow ATR Multiplier",  minval=0.5, maxval=8.0, step=0.1, group=grpST)
-useSlowConf = input.bool(true, "Require Slow Supertrend Confirmation",            group=grpST)
+grpST   = "Supertrend"
+atrLen  = input.int(10,   "ATR Length",     minval=2,   maxval=50,  step=1,   group=grpST)
+atrMult = input.float(2.0, "ATR Multiplier", minval=0.5, maxval=5.0, step=0.1, group=grpST)
 
 // -----------------------------------------------------------------------------
-// Inputs - Higher Timeframe Trend
+// Inputs - Backtest Window (for IS/OOS attribution; not a signal filter)
 // -----------------------------------------------------------------------------
-grpHTF = "Higher Timeframe Filter"
-useHTF   = input.bool(true,    "Use HTF Supertrend Filter",                       group=grpHTF)
-htfRes   = input.timeframe("15", "HTF Resolution",                                group=grpHTF)
-htfLen   = input.int(10,   "HTF ATR Length",        minval=2,   maxval=50,  step=1,   group=grpHTF)
-htfMult  = input.float(3.0, "HTF ATR Multiplier",   minval=0.5, maxval=8.0, step=0.1, group=grpHTF)
-
-// -----------------------------------------------------------------------------
-// Inputs - Filters
-// -----------------------------------------------------------------------------
-grpFlt = "Signal Filters"
-useEma     = input.bool(true,  "EMA Trend Filter",                                group=grpFlt)
-emaLen     = input.int(50,   "EMA Length",           minval=5,   maxval=300, step=1,   group=grpFlt)
-useRsi     = input.bool(true,  "RSI Momentum Filter",                             group=grpFlt)
-rsiLen     = input.int(14,   "RSI Length",           minval=2,   maxval=50,  step=1,   group=grpFlt)
-rsiBull    = input.int(50,   "RSI Bull Threshold",   minval=40,  maxval=70,  step=1,   group=grpFlt)
-rsiBear    = input.int(50,   "RSI Bear Threshold",   minval=30,  maxval=60,  step=1,   group=grpFlt)
-useVol     = input.bool(true,  "Volume Spike Filter",                             group=grpFlt)
-volLen     = input.int(20,   "Volume MA Length",     minval=5,   maxval=100, step=1,   group=grpFlt)
-volMult    = input.float(1.2, "Volume Spike Multiplier", minval=0.5, maxval=3.0, step=0.1, group=grpFlt)
-useMinAtr  = input.bool(true,  "Min ATR% Filter (skip dead markets)",             group=grpFlt)
-minAtrPct  = input.float(0.05, "Min ATR % of Price", minval=0.0, maxval=2.0, step=0.01, group=grpFlt)
-useConfirmed = input.bool(true, "Require Confirmed Bar (no repaint)",             group=grpFlt,
-     tooltip="When on, entries fire only on bar close. Off = act intrabar (faster but the supertrend may un-flip).")
-
-// -----------------------------------------------------------------------------
-// Inputs - Session Filter (US Futures RTH focus)
-// -----------------------------------------------------------------------------
-grpSess = "Session Filter (RTH)"
-useSession = input.bool(true,  "Restrict to RTH Session",                         group=grpSess)
-sessTime   = input.session("0935-1555", "Active RTH Window",                      group=grpSess,
-     tooltip="Default 0935-1555 ET = US Futures/Cash RTH minus 5-min open/close edges.")
-useLunch   = input.bool(true,  "Skip Midday Lunch Lull",                          group=grpSess)
-lunchTime  = input.session("1200-1300", "Lunch Session to Exclude",               group=grpSess)
-sessTz     = input.string("America/New_York", "Session Timezone",                 group=grpSess,
-     options=["America/New_York", "America/Chicago", "Europe/London", "Asia/Tokyo", "exchange"])
-
-// -----------------------------------------------------------------------------
-// Inputs - Risk / Targets
-// -----------------------------------------------------------------------------
-grpRisk = "Risk & Targets"
-slMult     = input.float(1.5, "Stop Loss ATR Mult",  minval=0.3, maxval=5.0, step=0.1, group=grpRisk)
-tp1Mult    = input.float(1.0, "TP1 R-Multiple",      minval=0.3, maxval=5.0, step=0.1, group=grpRisk,
-     tooltip="Target distance as a multiple of risk (SL distance). 1.0 = 1R.")
-tp2Mult    = input.float(2.0, "TP2 R-Multiple",      minval=0.5, maxval=8.0, step=0.1, group=grpRisk)
-tp3Mult    = input.float(3.0, "TP3 R-Multiple",      minval=1.0, maxval=12.0, step=0.1, group=grpRisk)
-showLevels = input.bool(true, "Show SL/TP Levels",                                group=grpRisk)
-levelLen   = input.int(20,   "Level Line Bars",      minval=1,   maxval=200, step=1,   group=grpRisk)
-
-// -----------------------------------------------------------------------------
-// Inputs - Trade Management
-// -----------------------------------------------------------------------------
-grpExit = "Trade Management"
-tp1Pct     = input.int(33, "TP1 % of Position",  minval=1, maxval=98, step=1, group=grpExit)
-tp2Pct     = input.int(33, "TP2 % of Position",  minval=1, maxval=98, step=1, group=grpExit)
-tp3Pct     = input.int(34, "TP3 % of Position",  minval=1, maxval=98, step=1, group=grpExit,
-     tooltip="The three percentages should sum to 100.")
-beOnTp1    = input.bool(true, "Move SL to Breakeven after TP1",                   group=grpExit)
-trailOnTp2 = input.bool(true, "Trail SL with Fast Supertrend after TP2",          group=grpExit)
-useEod     = input.bool(true, "Flatten at Session End",                           group=grpExit)
-eodTime    = input.session("1555-1559", "EOD Flatten Window",                     group=grpExit,
-     tooltip="Position closed during this window each day. Set to match your active session.")
-
-// -----------------------------------------------------------------------------
-// Inputs - Walk-Forward / Backtest Window
-// -----------------------------------------------------------------------------
-grpWF      = "Walk-Forward"
-useWF      = input.bool(false, "Restrict Backtest to Date Range",                 group=grpWF)
-wfMode     = input.string("All", "Window Mode",
-     options=["All", "In-Sample Only", "Out-of-Sample Only"],                     group=grpWF,
-     tooltip="Run all dates, IS only (calibration), or OOS only (validation).")
-isStart    = input.time(timestamp("2023-01-01 00:00 -0500"), "In-Sample Start",   group=grpWF)
-isEnd      = input.time(timestamp("2024-06-30 23:59 -0500"), "In-Sample End / OOS Start", group=grpWF)
-oosEnd     = input.time(timestamp("2025-12-31 23:59 -0500"), "Out-of-Sample End", group=grpWF)
-showWfTbl  = input.bool(true,  "Show IS / OOS Metrics Table",                     group=grpWF)
+grpWF     = "Backtest Window"
+useWF     = input.bool(false, "Restrict Backtest to Date Range",                 group=grpWF)
+isStart   = input.time(timestamp("2023-01-01 00:00 -0500"), "In-Sample Start",   group=grpWF)
+isEnd     = input.time(timestamp("2024-06-30 23:59 -0500"), "In-Sample End / OOS Start", group=grpWF)
+oosEnd    = input.time(timestamp("2025-12-31 23:59 -0500"), "Out-of-Sample End", group=grpWF)
+showWfTbl = input.bool(true,  "Show IS / OOS Metrics Table",                     group=grpWF)
 
 // -----------------------------------------------------------------------------
 // Inputs - Visuals
 // -----------------------------------------------------------------------------
-grpViz = "Visuals"
-showSTLines = input.bool(true,  "Plot Supertrend Lines",                          group=grpViz)
-colorBars   = input.bool(true,  "Color Bars by Trend",                            group=grpViz)
-showSignals = input.bool(true,  "Show Buy/Sell Markers",                          group=grpViz)
-bullCol     = input.color(color.new(#26a69a, 0), "Bull Color",                    group=grpViz)
-bearCol     = input.color(color.new(#ef5350, 0), "Bear Color",                    group=grpViz)
+grpViz     = "Visuals"
+showSTLine = input.bool(true, "Plot Supertrend Line",                            group=grpViz)
+colorBars  = input.bool(true, "Color Bars by Trend",                             group=grpViz)
+showLabels = input.bool(true, "Show Entry Markers",                              group=grpViz)
+bullCol    = input.color(color.new(#26a69a, 0), "Bull Color",                    group=grpViz)
+bearCol    = input.color(color.new(#ef5350, 0), "Bear Color",                    group=grpViz)
 
 // =============================================================================
-// Helpers
+// Supertrend
 // =============================================================================
 supertrend(simple int len, simple float mult) =>
     atrV = ta.atr(len)
@@ -148,140 +69,35 @@ supertrend(simple int len, simple float mult) =>
     stLine = trnd == 1 ? dnBand : upBand
     [stLine, trnd]
 
-supertrendDir(simple int len, simple float mult) =>
-    [_st, _dir] = supertrend(len, mult)
-    _dir
+[stLine, dir] = supertrend(atrLen, atrMult)
+
+flipUp = ta.change(dir) ==  2
+flipDn = ta.change(dir) == -2
 
 // =============================================================================
-// Computations
+// Backtest window (optional date scoping; no signal filters here)
 // =============================================================================
-[fastST, fastDir] = supertrend(fastLen, fastMult)
-[slowST, slowDir] = supertrend(slowLen, slowMult)
-
-htfDirRaw = request.security(syminfo.tickerid, htfRes,
-     supertrendDir(htfLen, htfMult)[1], lookahead=barmerge.lookahead_off)
-htfDir = useHTF ? htfDirRaw : 1
-
-emaVal   = ta.ema(close, emaLen)
-rsiVal   = ta.rsi(close, rsiLen)
-volMa    = ta.sma(volume, volLen)
-atrVal   = ta.atr(fastLen)
-atrPct   = (atrVal / close) * 100.0
-
-emaBull   = not useEma or close > emaVal
-emaBear   = not useEma or close < emaVal
-rsiBullOk = not useRsi or rsiVal > rsiBull
-rsiBearOk = not useRsi or rsiVal < rsiBear
-volOk     = not useVol or volume > volMa * volMult
-atrOk     = not useMinAtr or atrPct >= minAtrPct
-
-tzArg     = sessTz == "exchange" ? syminfo.timezone : sessTz
-inRth     = not na(time(timeframe.period, sessTime,  tzArg))
-inLunch   = useLunch and not na(time(timeframe.period, lunchTime, tzArg))
-sessOk    = not useSession or (inRth and not inLunch)
-inEodWin  = useEod and not na(time(timeframe.period, eodTime, tzArg))
-
-// Walk-forward window gate
-inIS      = time >= isStart and time <  isEnd
-inOOS     = time >= isEnd   and time <= oosEnd
-inAny     = time >= isStart and time <= oosEnd
-wfWindow  = wfMode == "In-Sample Only" ? inIS : wfMode == "Out-of-Sample Only" ? inOOS : inAny
-wfOk      = not useWF or wfWindow
-
-htfBull  = not useHTF or htfDir ==  1
-htfBear  = not useHTF or htfDir == -1
-slowBull = not useSlowConf or slowDir ==  1
-slowBear = not useSlowConf or slowDir == -1
-
-flipUp   = ta.change(fastDir) ==  2
-flipDn   = ta.change(fastDir) == -2
-
-confirmGate = not useConfirmed or barstate.isconfirmed
-
-longSig  = flipUp  and slowBull and htfBull and emaBull and rsiBullOk and volOk and atrOk and sessOk and confirmGate and wfOk
-shortSig = flipDn  and slowBear and htfBear and emaBear and rsiBearOk and volOk and atrOk and sessOk and confirmGate and wfOk
+inIS  = time >= isStart and time <  isEnd
+inOOS = time >= isEnd   and time <= oosEnd
+inAny = time >= isStart and time <= oosEnd
+wfOk  = not useWF or inAny
 
 // =============================================================================
-// Entry & SL/TP latching
+// Always-in entries (auto-reverse on every flip; pyramiding=0)
 // =============================================================================
-var float entryPx = na
-var float slPx    = na
-var float tp1Px   = na
-var float tp2Px   = na
-var float tp3Px   = na
-var int   entryBar = na
-
-newLong  = longSig  and strategy.position_size <= 0 and not inEodWin
-newShort = shortSig and strategy.position_size >= 0 and not inEodWin
-
-if newLong
-    risk    = slMult * atrVal
-    entryPx := close
-    slPx    := close - risk
-    tp1Px   := close + tp1Mult * risk
-    tp2Px   := close + tp2Mult * risk
-    tp3Px   := close + tp3Mult * risk
-    entryBar := bar_index
-    strategy.entry("Long", strategy.long, comment="Long")
-
-if newShort
-    risk    = slMult * atrVal
-    entryPx := close
-    slPx    := close + risk
-    tp1Px   := close - tp1Mult * risk
-    tp2Px   := close - tp2Mult * risk
-    tp3Px   := close - tp3Mult * risk
-    entryBar := bar_index
+if flipUp and wfOk
+    strategy.entry("Long",  strategy.long,  comment="Long")
+if flipDn and wfOk
     strategy.entry("Short", strategy.short, comment="Short")
 
 // =============================================================================
-// Trade management - track partial fills, update stops dynamically
+// IS / OOS attribution
 // =============================================================================
-var bool tp1Hit = false
-var bool tp2Hit = false
-
-if strategy.position_size == 0
-    tp1Hit := false
-    tp2Hit := false
-if newLong or newShort
-    tp1Hit := false
-    tp2Hit := false
-
-if strategy.position_size > 0
-    if high >= tp1Px
-        tp1Hit := true
-    if high >= tp2Px
-        tp2Hit := true
-if strategy.position_size < 0
-    if low <= tp1Px
-        tp1Hit := true
-    if low <= tp2Px
-        tp2Hit := true
-
-longStop  = trailOnTp2 and tp2Hit ? math.max(fastST, entryPx) : beOnTp1 and tp1Hit ? entryPx : slPx
-shortStop = trailOnTp2 and tp2Hit ? math.min(fastST, entryPx) : beOnTp1 and tp1Hit ? entryPx : slPx
-
-if strategy.position_size > 0
-    strategy.exit("X1", from_entry="Long",  qty_percent=tp1Pct, limit=tp1Px, stop=longStop,  comment_loss="SL", comment_profit="TP1")
-    strategy.exit("X2", from_entry="Long",  qty_percent=tp2Pct, limit=tp2Px, stop=longStop,  comment_loss="SL", comment_profit="TP2")
-    strategy.exit("X3", from_entry="Long",  qty_percent=tp3Pct, limit=tp3Px, stop=longStop,  comment_loss="SL", comment_profit="TP3")
-
-if strategy.position_size < 0
-    strategy.exit("X1", from_entry="Short", qty_percent=tp1Pct, limit=tp1Px, stop=shortStop, comment_loss="SL", comment_profit="TP1")
-    strategy.exit("X2", from_entry="Short", qty_percent=tp2Pct, limit=tp2Px, stop=shortStop, comment_loss="SL", comment_profit="TP2")
-    strategy.exit("X3", from_entry="Short", qty_percent=tp3Pct, limit=tp3Px, stop=shortStop, comment_loss="SL", comment_profit="TP3")
-
-if inEodWin and strategy.position_size != 0
-    strategy.close_all(comment="EOD")
-
-// =============================================================================
-// Walk-Forward attribution (entry-time bucketed by IS/OOS)
-// =============================================================================
-var int   isTrades = 0
-var int   isWins   = 0
-var float isPnL    = 0.0
-var float isGProf  = 0.0
-var float isGLoss  = 0.0
+var int   isTrades  = 0
+var int   isWins    = 0
+var float isPnL     = 0.0
+var float isGProf   = 0.0
+var float isGLoss   = 0.0
 var int   oosTrades = 0
 var int   oosWins   = 0
 var float oosPnL    = 0.0
@@ -293,113 +109,48 @@ if strategy.closedtrades > lastClosed
     for i = lastClosed to strategy.closedtrades - 1
         et    = strategy.closedtrades.entry_time(i)
         pnl   = strategy.closedtrades.profit(i)
-        isOne = et >= isStart and et <  isEnd
-        oosOne = et >= isEnd  and et <= oosEnd
+        isOne  = et >= isStart and et <  isEnd
+        oosOne = et >= isEnd   and et <= oosEnd
         if isOne
             isTrades += 1
             isPnL    += pnl
             if pnl > 0
-                isWins   += 1
-                isGProf  += pnl
+                isWins  += 1
+                isGProf += pnl
             else
-                isGLoss  += -pnl
+                isGLoss += -pnl
         if oosOne
             oosTrades += 1
             oosPnL    += pnl
             if pnl > 0
-                oosWins   += 1
-                oosGProf  += pnl
+                oosWins  += 1
+                oosGProf += pnl
             else
-                oosGLoss  += -pnl
+                oosGLoss += -pnl
     lastClosed := strategy.closedtrades
 
 // =============================================================================
 // Plots
 // =============================================================================
-plot(showSTLines and fastDir ==  1 ? fastST : na, "Fast ST Up",
+plot(showSTLine and dir ==  1 ? stLine : na, "ST Up",
      color=bullCol, linewidth=2, style=plot.style_linebr)
-plot(showSTLines and fastDir == -1 ? fastST : na, "Fast ST Dn",
+plot(showSTLine and dir == -1 ? stLine : na, "ST Dn",
      color=bearCol, linewidth=2, style=plot.style_linebr)
-plot(showSTLines and slowDir ==  1 ? slowST : na, "Slow ST Up",
-     color=color.new(bullCol, 50), linewidth=1, style=plot.style_linebr)
-plot(showSTLines and slowDir == -1 ? slowST : na, "Slow ST Dn",
-     color=color.new(bearCol, 50), linewidth=1, style=plot.style_linebr)
-plot(useEma ? emaVal : na, "EMA Filter", color=color.new(color.orange, 0), linewidth=1)
 
-barcolor(colorBars ? (fastDir == 1 ? bullCol : bearCol) : na)
+barcolor(colorBars ? (dir == 1 ? bullCol : bearCol) : na)
 
-plotshape(showSignals and newLong,  title="BUY",
-     style=shape.labelup,   location=location.belowbar, color=bullCol,
-     textcolor=color.white, text="BUY",  size=size.tiny)
-plotshape(showSignals and newShort, title="SELL",
-     style=shape.labeldown, location=location.abovebar, color=bearCol,
-     textcolor=color.white, text="SELL", size=size.tiny)
+plotshape(showLabels and flipUp and wfOk, title="LONG",  style=shape.labelup,
+     location=location.belowbar, color=bullCol, textcolor=color.white,
+     text="L", size=size.tiny)
+plotshape(showLabels and flipDn and wfOk, title="SHORT", style=shape.labeldown,
+     location=location.abovebar, color=bearCol, textcolor=color.white,
+     text="S", size=size.tiny)
 
-// IS/OOS background tint
-bgcolor(useWF and inIS  ? color.new(bullCol, 95) : na, title="IS Tint")
-bgcolor(useWF and inOOS ? color.new(color.yellow, 95) : na, title="OOS Tint")
-
-// SL / TP level lines (entry-time levels)
-var line slLine  = na
-var line tp1Line = na
-var line tp2Line = na
-var line tp3Line = na
-
-if showLevels and (newLong or newShort)
-    line.delete(slLine)
-    line.delete(tp1Line)
-    line.delete(tp2Line)
-    line.delete(tp3Line)
-    slLine  := line.new(bar_index, slPx,  bar_index + levelLen, slPx,
-         color=color.red,   width=2, style=line.style_dashed)
-    tp1Line := line.new(bar_index, tp1Px, bar_index + levelLen, tp1Px,
-         color=color.lime,  width=1, style=line.style_dotted)
-    tp2Line := line.new(bar_index, tp2Px, bar_index + levelLen, tp2Px,
-         color=color.green, width=1, style=line.style_dotted)
-    tp3Line := line.new(bar_index, tp3Px, bar_index + levelLen, tp3Px,
-         color=color.teal,  width=2, style=line.style_dotted)
-
-plot(strategy.position_size > 0 ? longStop  : na, "Long Trail",
-     color=color.new(color.red, 30), style=plot.style_linebr, linewidth=2)
-plot(strategy.position_size < 0 ? shortStop : na, "Short Trail",
-     color=color.new(color.red, 30), style=plot.style_linebr, linewidth=2)
+bgcolor(useWF and inIS  ? color.new(bullCol, 95)        : na, title="IS Tint")
+bgcolor(useWF and inOOS ? color.new(color.yellow, 95)   : na, title="OOS Tint")
 
 // =============================================================================
-// Diagnostic Table (top-right)
-// =============================================================================
-var table info = table.new(position.top_right, 2, 8,
-     bgcolor=color.new(color.black, 80), border_width=1)
-if barstate.islast
-    posTxt = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
-    posClr = strategy.position_size > 0 ? bullCol : strategy.position_size < 0 ? bearCol : color.gray
-    sessTxt = not useSession ? "OFF" : inLunch ? "LUNCH" : inRth ? "RTH" : "CLOSED"
-    sessClr = not useSession ? color.gray : sessTxt == "RTH" ? bullCol : color.gray
-    tpStg   = tp2Hit ? "TRAIL" : tp1Hit ? "BE" : strategy.position_size != 0 ? "INIT" : "-"
-
-    table.cell(info, 0, 0, "Trend",    text_color=color.white)
-    table.cell(info, 1, 0, fastDir == 1 ? "BULL" : "BEAR",
-         text_color=fastDir == 1 ? bullCol : bearCol)
-    table.cell(info, 0, 1, "HTF",      text_color=color.white)
-    table.cell(info, 1, 1, htfDir == 1 ? "BULL" : "BEAR",
-         text_color=htfDir == 1 ? bullCol : bearCol)
-    table.cell(info, 0, 2, "ATR%",     text_color=color.white)
-    table.cell(info, 1, 2, str.tostring(atrPct, "#.###") + "%",
-         text_color=atrOk ? color.white : color.gray)
-    table.cell(info, 0, 3, "RSI",      text_color=color.white)
-    table.cell(info, 1, 3, str.tostring(rsiVal, "#.##"), text_color=color.white)
-    table.cell(info, 0, 4, "Vol x MA", text_color=color.white)
-    table.cell(info, 1, 4, str.tostring(volume / volMa, "#.##") + "x",
-         text_color=volOk ? color.white : color.gray)
-    table.cell(info, 0, 5, "Session",  text_color=color.white)
-    table.cell(info, 1, 5, sessTxt,    text_color=sessClr)
-    table.cell(info, 0, 6, "Position", text_color=color.white)
-    table.cell(info, 1, 6, posTxt,     text_color=posClr)
-    table.cell(info, 0, 7, "Stop Stg", text_color=color.white)
-    table.cell(info, 1, 7, tpStg,
-         text_color=tpStg == "TRAIL" ? bullCol : tpStg == "BE" ? color.yellow : color.white)
-
-// =============================================================================
-// Walk-Forward Metrics Table (bottom-left)
+// IS / OOS Metrics Table
 // =============================================================================
 fmtPct(int wins, int n) =>
     n == 0 ? "-" : str.tostring(100.0 * wins / n, "#.0") + "%"
@@ -411,10 +162,10 @@ avg(float pnl, int n) =>
 var table wf = table.new(position.bottom_left, 4, 7,
      bgcolor=color.new(color.black, 80), border_width=1)
 if barstate.islast and showWfTbl
-    table.cell(wf, 0, 0, "Walk-Forward",  text_color=color.white, bgcolor=color.new(color.gray, 60))
-    table.cell(wf, 1, 0, "IS",            text_color=bullCol,     bgcolor=color.new(color.gray, 60))
-    table.cell(wf, 2, 0, "OOS",           text_color=color.yellow,bgcolor=color.new(color.gray, 60))
-    table.cell(wf, 3, 0, "All",           text_color=color.white, bgcolor=color.new(color.gray, 60))
+    table.cell(wf, 0, 0, "Walk-Forward",  text_color=color.white,  bgcolor=color.new(color.gray, 60))
+    table.cell(wf, 1, 0, "IS",            text_color=bullCol,      bgcolor=color.new(color.gray, 60))
+    table.cell(wf, 2, 0, "OOS",           text_color=color.yellow, bgcolor=color.new(color.gray, 60))
+    table.cell(wf, 3, 0, "All",           text_color=color.white,  bgcolor=color.new(color.gray, 60))
 
     allTrades = isTrades + oosTrades
     allWins   = isWins   + oosWins
@@ -447,10 +198,8 @@ if barstate.islast and showWfTbl
     table.cell(wf, 2, 5, pf(oosGProf, oosGLoss), text_color=color.white)
     table.cell(wf, 3, 5, pf(allGProf, allGLoss), text_color=color.white)
 
-    // OOS / IS efficiency (avg-trade ratio): >0.7 generally indicates the
-    // parameters survived out of sample without too much performance decay.
-    isAvg  = isTrades  == 0 ? 0.0 : isPnL  / isTrades
-    oosAvg = oosTrades == 0 ? 0.0 : oosPnL / oosTrades
+    isAvg    = isTrades  == 0 ? 0.0 : isPnL  / isTrades
+    oosAvg   = oosTrades == 0 ? 0.0 : oosPnL / oosTrades
     effRatio = isAvg <= 0.0 ? 0.0 : oosAvg / isAvg
     eff      = isAvg <= 0.0 ? "-" : str.tostring(effRatio, "#.00")
     effClr   = isAvg <= 0.0 ? color.gray : effRatio >= 0.7 ? bullCol : effRatio >= 0.3 ? color.yellow : bearCol

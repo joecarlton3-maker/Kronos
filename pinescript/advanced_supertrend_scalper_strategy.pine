@@ -1,0 +1,339 @@
+//@version=5
+// =============================================================================
+// Advanced Supertrend Scalper - STRATEGY VERSION
+// -----------------------------------------------------------------------------
+// Backtestable strategy with active trade management:
+//   * Partial exits: TP1 / TP2 / TP3 (configurable splits, default 33/33/34)
+//   * Move SL to breakeven after TP1 fills
+//   * Trail SL with Fast Supertrend after TP2 fills
+//   * EOD flatten (no overnight risk on intraday systems)
+//   * RTH session focus + lunch-lull skip + all filters from the indicator
+//   * Auto-reverse on opposite signal (pyramiding disabled)
+// =============================================================================
+
+strategy("Advanced Supertrend Scalper Strategy", shorttitle="AST Scalper Strat",
+     overlay              = true,
+     initial_capital      = 10000,
+     default_qty_type     = strategy.percent_of_equity,
+     default_qty_value    = 10,
+     pyramiding           = 0,
+     commission_type      = strategy.commission.cash_per_order,
+     commission_value     = 0,
+     slippage             = 1,
+     process_orders_on_close = true,
+     calc_on_every_tick   = false,
+     max_lines_count      = 500,
+     max_labels_count     = 500,
+     max_bars_back        = 2000)
+
+// -----------------------------------------------------------------------------
+// Inputs - Supertrend
+// -----------------------------------------------------------------------------
+grpST = "Supertrend"
+fastLen   = input.int(10,  "Fast ATR Length",        minval=1, group=grpST)
+fastMult  = input.float(2.0, "Fast ATR Multiplier",   minval=0.1, step=0.1, group=grpST)
+slowLen   = input.int(20,  "Slow ATR Length",        minval=1, group=grpST)
+slowMult  = input.float(3.0, "Slow ATR Multiplier",  minval=0.1, step=0.1, group=grpST)
+useSlowConf = input.bool(true, "Require Slow Supertrend Confirmation", group=grpST)
+
+// -----------------------------------------------------------------------------
+// Inputs - Higher Timeframe Trend
+// -----------------------------------------------------------------------------
+grpHTF = "Higher Timeframe Filter"
+useHTF   = input.bool(true,  "Use HTF Supertrend Filter",      group=grpHTF)
+htfRes   = input.timeframe("15", "HTF Resolution",             group=grpHTF)
+htfLen   = input.int(10,  "HTF ATR Length",     minval=1,      group=grpHTF)
+htfMult  = input.float(3.0, "HTF ATR Multiplier", minval=0.1, step=0.1, group=grpHTF)
+
+// -----------------------------------------------------------------------------
+// Inputs - Filters
+// -----------------------------------------------------------------------------
+grpFlt = "Signal Filters"
+useEma     = input.bool(true,  "EMA Trend Filter",                    group=grpFlt)
+emaLen     = input.int(50,    "EMA Length",          minval=2,        group=grpFlt)
+useRsi     = input.bool(true,  "RSI Momentum Filter",                 group=grpFlt)
+rsiLen     = input.int(14,    "RSI Length",          minval=2,        group=grpFlt)
+rsiBull    = input.int(50,    "RSI Bull Threshold",  minval=1, maxval=99, group=grpFlt)
+rsiBear    = input.int(50,    "RSI Bear Threshold",  minval=1, maxval=99, group=grpFlt)
+useVol     = input.bool(true,  "Volume Spike Filter",                 group=grpFlt)
+volLen     = input.int(20,    "Volume MA Length",    minval=1,        group=grpFlt)
+volMult    = input.float(1.2, "Volume Spike Multiplier", minval=0.1, step=0.1, group=grpFlt)
+useMinAtr  = input.bool(true,  "Min ATR% Filter (skip dead markets)", group=grpFlt)
+minAtrPct  = input.float(0.05, "Min ATR % of Price",  minval=0.0, step=0.01, group=grpFlt)
+useConfirmed = input.bool(true, "Require Confirmed Bar (no repaint)", group=grpFlt,
+     tooltip="When on, entries fire only on bar close. Off = act intrabar (faster but the supertrend may un-flip).")
+
+// -----------------------------------------------------------------------------
+// Inputs - Session Filter (US Futures RTH focus)
+// -----------------------------------------------------------------------------
+grpSess = "Session Filter (RTH)"
+useSession = input.bool(true, "Restrict to RTH Session", group=grpSess)
+sessTime   = input.session("0935-1555", "Active RTH Window", group=grpSess,
+     tooltip="Default 0935-1555 ET = US Futures/Cash RTH minus 5-min open/close edges.")
+useLunch   = input.bool(true, "Skip Midday Lunch Lull", group=grpSess)
+lunchTime  = input.session("1200-1300", "Lunch Session to Exclude", group=grpSess)
+sessTz     = input.string("America/New_York", "Session Timezone", group=grpSess,
+     options=["America/New_York", "America/Chicago", "Europe/London", "Asia/Tokyo", "exchange"])
+
+// -----------------------------------------------------------------------------
+// Inputs - Risk / Targets
+// -----------------------------------------------------------------------------
+grpRisk = "Risk & Targets"
+slMult     = input.float(1.5, "Stop Loss ATR Mult",  minval=0.1, step=0.1, group=grpRisk)
+tp1Mult    = input.float(1.0, "TP1 R-Multiple",      minval=0.1, step=0.1, group=grpRisk,
+     tooltip="Target distance as a multiple of risk (SL distance). 1.0 = 1R.")
+tp2Mult    = input.float(2.0, "TP2 R-Multiple",      minval=0.1, step=0.1, group=grpRisk)
+tp3Mult    = input.float(3.0, "TP3 R-Multiple",      minval=0.1, step=0.1, group=grpRisk)
+showLevels = input.bool(true, "Show SL/TP Levels",   group=grpRisk)
+levelLen   = input.int(20, "Level Line Bars",        minval=1,    group=grpRisk)
+
+// -----------------------------------------------------------------------------
+// Inputs - Trade Management
+// -----------------------------------------------------------------------------
+grpExit = "Trade Management"
+tp1Pct     = input.int(33, "TP1 % of Position",  minval=1, maxval=98, group=grpExit)
+tp2Pct     = input.int(33, "TP2 % of Position",  minval=1, maxval=98, group=grpExit)
+tp3Pct     = input.int(34, "TP3 % of Position",  minval=1, maxval=98, group=grpExit,
+     tooltip="The three percentages should sum to 100.")
+beOnTp1    = input.bool(true, "Move SL to Breakeven after TP1", group=grpExit)
+trailOnTp2 = input.bool(true, "Trail SL with Fast Supertrend after TP2", group=grpExit)
+useEod     = input.bool(true, "Flatten at Session End", group=grpExit)
+eodTime    = input.session("1555-1559", "EOD Flatten Window", group=grpExit,
+     tooltip="Position closed during this window each day. Set to match your active session.")
+
+// -----------------------------------------------------------------------------
+// Inputs - Visuals
+// -----------------------------------------------------------------------------
+grpViz = "Visuals"
+showSTLines = input.bool(true,  "Plot Supertrend Lines",  group=grpViz)
+colorBars   = input.bool(true,  "Color Bars by Trend",    group=grpViz)
+showSignals = input.bool(true,  "Show Buy/Sell Markers",  group=grpViz)
+bullCol     = input.color(color.new(#26a69a, 0), "Bull Color", group=grpViz)
+bearCol     = input.color(color.new(#ef5350, 0), "Bear Color", group=grpViz)
+
+// =============================================================================
+// Helpers
+// =============================================================================
+supertrend(simple int len, simple float mult) =>
+    atrV = ta.atr(len)
+    src  = (high + low) / 2.0
+    upBasic = src + mult * atrV
+    dnBasic = src - mult * atrV
+    var float upBand = na
+    var float dnBand = na
+    var int   trnd   = 1
+    upBand := na(upBand[1]) ? upBasic : (upBasic < upBand[1] or close[1] > upBand[1] ? upBasic : upBand[1])
+    dnBand := na(dnBand[1]) ? dnBasic : (dnBasic > dnBand[1] or close[1] < dnBand[1] ? dnBasic : dnBand[1])
+    trnd  := na(trnd[1]) ? 1 :
+             trnd[1] == -1 and close > upBand[1] ? 1 :
+             trnd[1] ==  1 and close < dnBand[1] ? -1 : trnd[1]
+    stLine = trnd == 1 ? dnBand : upBand
+    [stLine, trnd]
+
+supertrendDir(simple int len, simple float mult) =>
+    [_st, _dir] = supertrend(len, mult)
+    _dir
+
+// =============================================================================
+// Computations
+// =============================================================================
+[fastST, fastDir] = supertrend(fastLen, fastMult)
+[slowST, slowDir] = supertrend(slowLen, slowMult)
+
+htfDirRaw = request.security(syminfo.tickerid, htfRes,
+     supertrendDir(htfLen, htfMult)[1], lookahead=barmerge.lookahead_off)
+htfDir = useHTF ? htfDirRaw : 1
+
+emaVal   = ta.ema(close, emaLen)
+rsiVal   = ta.rsi(close, rsiLen)
+volMa    = ta.sma(volume, volLen)
+atrVal   = ta.atr(fastLen)
+atrPct   = (atrVal / close) * 100.0
+
+emaBull   = not useEma or close > emaVal
+emaBear   = not useEma or close < emaVal
+rsiBullOk = not useRsi or rsiVal > rsiBull
+rsiBearOk = not useRsi or rsiVal < rsiBear
+volOk     = not useVol or volume > volMa * volMult
+atrOk     = not useMinAtr or atrPct >= minAtrPct
+
+tzArg     = sessTz == "exchange" ? syminfo.timezone : sessTz
+inRth     = not na(time(timeframe.period, sessTime,  tzArg))
+inLunch   = useLunch and not na(time(timeframe.period, lunchTime, tzArg))
+sessOk    = not useSession or (inRth and not inLunch)
+inEodWin  = useEod and not na(time(timeframe.period, eodTime, tzArg))
+
+htfBull  = not useHTF or htfDir ==  1
+htfBear  = not useHTF or htfDir == -1
+slowBull = not useSlowConf or slowDir ==  1
+slowBear = not useSlowConf or slowDir == -1
+
+flipUp   = ta.change(fastDir) ==  2
+flipDn   = ta.change(fastDir) == -2
+
+confirmGate = not useConfirmed or barstate.isconfirmed
+
+longSig  = flipUp  and slowBull and htfBull and emaBull and rsiBullOk and volOk and atrOk and sessOk and confirmGate
+shortSig = flipDn  and slowBear and htfBear and emaBear and rsiBearOk and volOk and atrOk and sessOk and confirmGate
+
+// =============================================================================
+// Entry & SL/TP latching
+// =============================================================================
+var float entryPx = na
+var float slPx    = na
+var float tp1Px   = na
+var float tp2Px   = na
+var float tp3Px   = na
+var int   entryBar = na
+
+newLong  = longSig  and strategy.position_size <= 0 and not inEodWin
+newShort = shortSig and strategy.position_size >= 0 and not inEodWin
+
+if newLong
+    risk    = slMult * atrVal
+    entryPx := close
+    slPx    := close - risk
+    tp1Px   := close + tp1Mult * risk
+    tp2Px   := close + tp2Mult * risk
+    tp3Px   := close + tp3Mult * risk
+    entryBar := bar_index
+    strategy.entry("Long", strategy.long, comment="Long")
+
+if newShort
+    risk    = slMult * atrVal
+    entryPx := close
+    slPx    := close + risk
+    tp1Px   := close - tp1Mult * risk
+    tp2Px   := close - tp2Mult * risk
+    tp3Px   := close - tp3Mult * risk
+    entryBar := bar_index
+    strategy.entry("Short", strategy.short, comment="Short")
+
+// =============================================================================
+// Trade management - track partial fills, update stops dynamically
+// =============================================================================
+var bool tp1Hit = false
+var bool tp2Hit = false
+
+if strategy.position_size == 0
+    tp1Hit := false
+    tp2Hit := false
+if newLong or newShort
+    tp1Hit := false
+    tp2Hit := false
+
+if strategy.position_size > 0
+    if high >= tp1Px
+        tp1Hit := true
+    if high >= tp2Px
+        tp2Hit := true
+if strategy.position_size < 0
+    if low <= tp1Px
+        tp1Hit := true
+    if low <= tp2Px
+        tp2Hit := true
+
+// Dynamic stop: original SL -> breakeven after TP1 -> Supertrend trail after TP2
+longStop  = trailOnTp2 and tp2Hit ? math.max(fastST, entryPx) :
+            beOnTp1   and tp1Hit ? entryPx :
+            slPx
+shortStop = trailOnTp2 and tp2Hit ? math.min(fastST, entryPx) :
+            beOnTp1   and tp1Hit ? entryPx :
+            slPx
+
+// Place / refresh bracket exits each bar
+if strategy.position_size > 0
+    strategy.exit("X1", from_entry="Long",  qty_percent=tp1Pct, limit=tp1Px, stop=longStop,  comment_loss="SL", comment_profit="TP1")
+    strategy.exit("X2", from_entry="Long",  qty_percent=tp2Pct, limit=tp2Px, stop=longStop,  comment_loss="SL", comment_profit="TP2")
+    strategy.exit("X3", from_entry="Long",  qty_percent=tp3Pct, limit=tp3Px, stop=longStop,  comment_loss="SL", comment_profit="TP3")
+
+if strategy.position_size < 0
+    strategy.exit("X1", from_entry="Short", qty_percent=tp1Pct, limit=tp1Px, stop=shortStop, comment_loss="SL", comment_profit="TP1")
+    strategy.exit("X2", from_entry="Short", qty_percent=tp2Pct, limit=tp2Px, stop=shortStop, comment_loss="SL", comment_profit="TP2")
+    strategy.exit("X3", from_entry="Short", qty_percent=tp3Pct, limit=tp3Px, stop=shortStop, comment_loss="SL", comment_profit="TP3")
+
+// EOD flatten
+if inEodWin and strategy.position_size != 0
+    strategy.close_all(comment="EOD")
+
+// =============================================================================
+// Plots
+// =============================================================================
+plot(showSTLines and fastDir ==  1 ? fastST : na, "Fast ST Up",
+     color=bullCol, linewidth=2, style=plot.style_linebr)
+plot(showSTLines and fastDir == -1 ? fastST : na, "Fast ST Dn",
+     color=bearCol, linewidth=2, style=plot.style_linebr)
+plot(showSTLines and slowDir ==  1 ? slowST : na, "Slow ST Up",
+     color=color.new(bullCol, 50), linewidth=1, style=plot.style_linebr)
+plot(showSTLines and slowDir == -1 ? slowST : na, "Slow ST Dn",
+     color=color.new(bearCol, 50), linewidth=1, style=plot.style_linebr)
+plot(useEma ? emaVal : na, "EMA Filter", color=color.new(color.orange, 0), linewidth=1)
+
+barcolor(colorBars ? (fastDir == 1 ? bullCol : bearCol) : na)
+
+plotshape(showSignals and newLong,  title="BUY",
+     style=shape.labelup,   location=location.belowbar, color=bullCol,
+     textcolor=color.white, text="BUY",  size=size.tiny)
+plotshape(showSignals and newShort, title="SELL",
+     style=shape.labeldown, location=location.abovebar, color=bearCol,
+     textcolor=color.white, text="SELL", size=size.tiny)
+
+// SL / TP level lines (entry-time levels, redrawn on new entries)
+var line slLine  = na
+var line tp1Line = na
+var line tp2Line = na
+var line tp3Line = na
+
+if showLevels and (newLong or newShort)
+    line.delete(slLine)
+    line.delete(tp1Line)
+    line.delete(tp2Line)
+    line.delete(tp3Line)
+    slLine  := line.new(bar_index, slPx,  bar_index + levelLen, slPx,
+         color=color.red,   width=2, style=line.style_dashed)
+    tp1Line := line.new(bar_index, tp1Px, bar_index + levelLen, tp1Px,
+         color=color.lime,  width=1, style=line.style_dotted)
+    tp2Line := line.new(bar_index, tp2Px, bar_index + levelLen, tp2Px,
+         color=color.green, width=1, style=line.style_dotted)
+    tp3Line := line.new(bar_index, tp3Px, bar_index + levelLen, tp3Px,
+         color=color.teal,  width=2, style=line.style_dotted)
+
+// Live trail line (visualizes the dynamic stop after TP1/TP2)
+plot(strategy.position_size > 0 ? longStop  : na, "Long Trail",
+     color=color.new(color.red, 30), style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size < 0 ? shortStop : na, "Short Trail",
+     color=color.new(color.red, 30), style=plot.style_linebr, linewidth=2)
+
+// =============================================================================
+// Diagnostic Table
+// =============================================================================
+var table info = table.new(position.top_right, 2, 8,
+     bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    posTxt = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    posClr = strategy.position_size > 0 ? bullCol : strategy.position_size < 0 ? bearCol : color.gray
+    sessTxt = not useSession ? "OFF" : inLunch ? "LUNCH" : inRth ? "RTH" : "CLOSED"
+    sessClr = not useSession ? color.gray : sessTxt == "RTH" ? bullCol : color.gray
+    tpStg   = tp2Hit ? "TRAIL" : tp1Hit ? "BE" : strategy.position_size != 0 ? "INIT" : "-"
+
+    table.cell(info, 0, 0, "Trend",    text_color=color.white)
+    table.cell(info, 1, 0, fastDir == 1 ? "BULL" : "BEAR",
+         text_color=fastDir == 1 ? bullCol : bearCol)
+    table.cell(info, 0, 1, "HTF",      text_color=color.white)
+    table.cell(info, 1, 1, htfDir == 1 ? "BULL" : "BEAR",
+         text_color=htfDir == 1 ? bullCol : bearCol)
+    table.cell(info, 0, 2, "ATR%",     text_color=color.white)
+    table.cell(info, 1, 2, str.tostring(atrPct, "#.###") + "%",
+         text_color=atrOk ? color.white : color.gray)
+    table.cell(info, 0, 3, "RSI",      text_color=color.white)
+    table.cell(info, 1, 3, str.tostring(rsiVal, "#.##"), text_color=color.white)
+    table.cell(info, 0, 4, "Vol x MA", text_color=color.white)
+    table.cell(info, 1, 4, str.tostring(volume / volMa, "#.##") + "x",
+         text_color=volOk ? color.white : color.gray)
+    table.cell(info, 0, 5, "Session",  text_color=color.white)
+    table.cell(info, 1, 5, sessTxt,    text_color=sessClr)
+    table.cell(info, 0, 6, "Position", text_color=color.white)
+    table.cell(info, 1, 6, posTxt,     text_color=posClr)
+    table.cell(info, 0, 7, "Stop Stg", text_color=color.white)
+    table.cell(info, 1, 7, tpStg,
+         text_color=tpStg == "TRAIL" ? bullCol : tpStg == "BE" ? color.yellow : color.white)

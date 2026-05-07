@@ -185,10 +185,8 @@ inEodWin  = useEod and not na(time(timeframe.period, eodTime, tzArg))
 inIS      = time >= isStart and time <  isEnd
 inOOS     = time >= isEnd   and time <= oosEnd
 inAny     = time >= isStart and time <= oosEnd
-wfOk      = not useWF or
-            (wfMode == "All"                ? inAny :
-             wfMode == "In-Sample Only"     ? inIS  :
-             wfMode == "Out-of-Sample Only" ? inOOS : inAny)
+wfWindow  = wfMode == "In-Sample Only" ? inIS : wfMode == "Out-of-Sample Only" ? inOOS : inAny
+wfOk      = not useWF or wfWindow
 
 htfBull  = not useHTF or htfDir ==  1
 htfBear  = not useHTF or htfDir == -1
@@ -260,12 +258,8 @@ if strategy.position_size < 0
     if low <= tp2Px
         tp2Hit := true
 
-longStop  = trailOnTp2 and tp2Hit ? math.max(fastST, entryPx) :
-            beOnTp1   and tp1Hit ? entryPx :
-            slPx
-shortStop = trailOnTp2 and tp2Hit ? math.min(fastST, entryPx) :
-            beOnTp1   and tp1Hit ? entryPx :
-            slPx
+longStop  = trailOnTp2 and tp2Hit ? math.max(fastST, entryPx) : beOnTp1 and tp1Hit ? entryPx : slPx
+shortStop = trailOnTp2 and tp2Hit ? math.min(fastST, entryPx) : beOnTp1 and tp1Hit ? entryPx : slPx
 
 if strategy.position_size > 0
     strategy.exit("X1", from_entry="Long",  qty_percent=tp1Pct, limit=tp1Px, stop=longStop,  comment_loss="SL", comment_profit="TP1")
@@ -457,10 +451,9 @@ if barstate.islast and showWfTbl
     // parameters survived out of sample without too much performance decay.
     isAvg  = isTrades  == 0 ? 0.0 : isPnL  / isTrades
     oosAvg = oosTrades == 0 ? 0.0 : oosPnL / oosTrades
-    eff    = isAvg <= 0.0 ? "-" : str.tostring(oosAvg / isAvg, "#.00")
-    effClr = isAvg <= 0.0 ? color.gray :
-             (oosAvg / isAvg) >= 0.7 ? bullCol :
-             (oosAvg / isAvg) >= 0.3 ? color.yellow : bearCol
+    effRatio = isAvg <= 0.0 ? 0.0 : oosAvg / isAvg
+    eff      = isAvg <= 0.0 ? "-" : str.tostring(effRatio, "#.00")
+    effClr   = isAvg <= 0.0 ? color.gray : effRatio >= 0.7 ? bullCol : effRatio >= 0.3 ? color.yellow : bearCol
     table.cell(wf, 0, 6, "OOS/IS Eff",    text_color=color.white)
     table.cell(wf, 1, 6, "",              text_color=color.white)
     table.cell(wf, 2, 6, "",              text_color=color.white)

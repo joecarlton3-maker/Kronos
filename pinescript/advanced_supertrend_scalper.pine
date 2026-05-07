@@ -100,15 +100,22 @@ supertrend(simple int len, simple float mult) =>
     stLine = trnd == 1 ? dnBand : upBand
     [stLine, trnd]
 
+// Direction-only wrapper so the value can be safely passed to request.security()
+// and offset with history-referencing [1] (non-repainting).
+supertrendDir(simple int len, simple float mult) =>
+    [_st, _dir] = supertrend(len, mult)
+    _dir
+
 // =============================================================================
 // Computations
 // =============================================================================
 [fastST, fastDir] = supertrend(fastLen, fastMult)
 [slowST, slowDir] = supertrend(slowLen, slowMult)
 
-// HTF trend (non-repainting: lookahead off, use confirmed bar)
-htfDir = useHTF ? request.security(syminfo.tickerid, htfRes,
-     supertrend(htfLen, htfMult)[1], lookahead=barmerge.lookahead_off) : 1
+// HTF trend (non-repainting: lookahead off + [1] on confirmed bar)
+htfDirRaw = request.security(syminfo.tickerid, htfRes,
+     supertrendDir(htfLen, htfMult)[1], lookahead=barmerge.lookahead_off)
+htfDir = useHTF ? htfDirRaw : 1
 
 // Filters
 emaVal   = ta.ema(close, emaLen)
@@ -200,28 +207,25 @@ plotshape(showSignals and shortSig, title="SELL",
      style=shape.labeldown, location=location.abovebar, color=bearCol,
      textcolor=color.white, text="SELL", size=size.tiny)
 
-// SL / TP level lines
+// SL / TP level lines (inlined: globals can't be reassigned inside a function)
 var line slLine  = na
 var line tp1Line = na
 var line tp2Line = na
 var line tp3Line = na
 
-drawLevels() =>
+if showLevels and (longSig or shortSig)
     line.delete(slLine)
     line.delete(tp1Line)
     line.delete(tp2Line)
     line.delete(tp3Line)
     slLine  := line.new(bar_index, slPx,  bar_index + levelLen, slPx,
-         color=color.red,    width=2, style=line.style_dashed)
+         color=color.red,   width=2, style=line.style_dashed)
     tp1Line := line.new(bar_index, tp1Px, bar_index + levelLen, tp1Px,
-         color=color.lime,   width=1, style=line.style_dotted)
+         color=color.lime,  width=1, style=line.style_dotted)
     tp2Line := line.new(bar_index, tp2Px, bar_index + levelLen, tp2Px,
-         color=color.green,  width=1, style=line.style_dotted)
+         color=color.green, width=1, style=line.style_dotted)
     tp3Line := line.new(bar_index, tp3Px, bar_index + levelLen, tp3Px,
-         color=color.teal,   width=2, style=line.style_dotted)
-
-if showLevels and (longSig or shortSig)
-    drawLevels()
+         color=color.teal,  width=2, style=line.style_dotted)
 
 // =============================================================================
 // Alerts

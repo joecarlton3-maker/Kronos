@@ -1,13 +1,15 @@
 //@version=5
 // =============================================================================
-// Supertrend Baseline Strategy (Always In Position)
+// Supertrend Baseline Strategy (Always In + TP1 / Breakeven)
 // -----------------------------------------------------------------------------
-// Pure single-Supertrend reversal: long on flip up, short on flip down.
-// No filters, no SL/TP overlay - the Supertrend line IS the trailing exit.
-// Use this as the baseline backtest; layer filters on top later based on the
-// performance attribution shown in the IS/OOS table.
+// Always-in Supertrend reversal with tick-based partial profit-take:
+//   * Enter long on flip up, short on flip down (auto-reverse on next flip)
+//   * TP1: take a configurable % of position off at +/- N ticks from entry
+//   * After TP1 fills, move stop on the runner to entry +/- N ticks (BE buffer)
+//   * Runner otherwise rides until the next Supertrend flip
 //
 // Optimizer-friendly: every numeric input has explicit minval/maxval/step.
+// IS/OOS metrics table preserved for backtest evaluation.
 // =============================================================================
 
 strategy("Supertrend Baseline (Always In)", shorttitle="ST Baseline",
@@ -21,34 +23,63 @@ strategy("Supertrend Baseline (Always In)", shorttitle="ST Baseline",
      slippage             = 1,
      process_orders_on_close = true,
      calc_on_every_tick   = false,
+     max_lines_count      = 500,
      max_bars_back        = 2000)
 
 // -----------------------------------------------------------------------------
-// Inputs - Supertrend (the only signal source)
+// Inputs - Supertrend
 // -----------------------------------------------------------------------------
 grpST   = "Supertrend"
 atrLen  = input.int(10,   "ATR Length",     minval=2,   maxval=50,  step=1,   group=grpST)
 atrMult = input.float(2.0, "ATR Multiplier", minval=0.5, maxval=5.0, step=0.1, group=grpST)
 
 // -----------------------------------------------------------------------------
+// Inputs - Targets & Stops (tick-based)
+// -----------------------------------------------------------------------------
+grpRisk    = "Targets & Stops"
+useTp1     = input.bool(true, "Take Partial at TP1",                              group=grpRisk)
+tp1Ticks   = input.int(8,  "TP1 Distance (ticks)",  minval=1, maxval=200, step=1, group=grpRisk)
+tp1Pct     = input.int(50, "TP1 % of Position",     minval=1, maxval=99,  step=1, group=grpRisk,
+     tooltip="Portion of the entry size taken off at TP1. Remainder rides on a breakeven stop.")
+useBE      = input.bool(true, "Move Runner SL to Breakeven after TP1",            group=grpRisk)
+beTicks    = input.int(1,  "Breakeven Buffer (ticks)", minval=0, maxval=50, step=1, group=grpRisk,
+     tooltip="Offset from entry for the runner stop. 0 = exact entry. Positive locks in N ticks of profit; covers commissions/slippage.")
+showLevels = input.bool(true, "Show TP1 / BE Levels",                             group=grpRisk)
+levelLen   = input.int(20, "Level Line Bars",        minval=1, maxval=200, step=1, group=grpRisk)
+
+// -----------------------------------------------------------------------------
+// Inputs - Session Filter (RTH window)
+// -----------------------------------------------------------------------------
+grpSess    = "Session Filter (RTH)"
+useSession = input.bool(true,  "Restrict Entries to Session",                     group=grpSess)
+sessTime   = input.session("0935-1555", "Active Session Window",                  group=grpSess,
+     tooltip="Default 0935-1555 ET = US Futures/Cash RTH minus 5-min open/close edges. Set 0930-1600 for full RTH.")
+useLunch   = input.bool(false, "Skip Midday Lunch Lull",                          group=grpSess)
+lunchTime  = input.session("1200-1300", "Lunch Session to Exclude",               group=grpSess)
+sessTz     = input.string("America/New_York", "Session Timezone",                 group=grpSess,
+     options=["America/New_York", "America/Chicago", "Europe/London", "Asia/Tokyo", "exchange"])
+flatAtClose = input.bool(true, "Flatten Position at Session Close",               group=grpSess,
+     tooltip="When on, any open position is closed when the bar exits the active session. Off = let the runner ride into after-hours until the next flip.")
+
+// -----------------------------------------------------------------------------
 // Inputs - Backtest Window (for IS/OOS attribution; not a signal filter)
 // -----------------------------------------------------------------------------
 grpWF     = "Backtest Window"
-useWF     = input.bool(false, "Restrict Backtest to Date Range",                 group=grpWF)
-isStart   = input.time(timestamp("2023-01-01 00:00 -0500"), "In-Sample Start",   group=grpWF)
+useWF     = input.bool(false, "Restrict Backtest to Date Range",                  group=grpWF)
+isStart   = input.time(timestamp("2023-01-01 00:00 -0500"), "In-Sample Start",    group=grpWF)
 isEnd     = input.time(timestamp("2024-06-30 23:59 -0500"), "In-Sample End / OOS Start", group=grpWF)
-oosEnd    = input.time(timestamp("2025-12-31 23:59 -0500"), "Out-of-Sample End", group=grpWF)
-showWfTbl = input.bool(true,  "Show IS / OOS Metrics Table",                     group=grpWF)
+oosEnd    = input.time(timestamp("2025-12-31 23:59 -0500"), "Out-of-Sample End",  group=grpWF)
+showWfTbl = input.bool(true,  "Show IS / OOS Metrics Table",                      group=grpWF)
 
 // -----------------------------------------------------------------------------
 // Inputs - Visuals
 // -----------------------------------------------------------------------------
 grpViz     = "Visuals"
-showSTLine = input.bool(true, "Plot Supertrend Line",                            group=grpViz)
-colorBars  = input.bool(true, "Color Bars by Trend",                             group=grpViz)
-showLabels = input.bool(true, "Show Entry Markers",                              group=grpViz)
-bullCol    = input.color(color.new(#26a69a, 0), "Bull Color",                    group=grpViz)
-bearCol    = input.color(color.new(#ef5350, 0), "Bear Color",                    group=grpViz)
+showSTLine = input.bool(true, "Plot Supertrend Line",                             group=grpViz)
+colorBars  = input.bool(true, "Color Bars by Trend",                              group=grpViz)
+showLabels = input.bool(true, "Show Entry Markers",                               group=grpViz)
+bullCol    = input.color(color.new(#26a69a, 0), "Bull Color",                     group=grpViz)
+bearCol    = input.color(color.new(#ef5350, 0), "Bear Color",                     group=grpViz)
 
 // =============================================================================
 // Supertrend
@@ -82,16 +113,71 @@ inOOS = time >= isEnd   and time <= oosEnd
 inAny = time >= isStart and time <= oosEnd
 wfOk  = not useWF or inAny
 
-// =============================================================================
-// Always-in entries (auto-reverse on every flip; pyramiding=0)
-// =============================================================================
-if flipUp and wfOk
-    strategy.entry("Long",  strategy.long,  comment="Long")
-if flipDn and wfOk
-    strategy.entry("Short", strategy.short, comment="Short")
+// Session gate (RTH window with optional lunch exclusion)
+tzArg     = sessTz == "exchange" ? syminfo.timezone : sessTz
+inRth     = not na(time(timeframe.period, sessTime,  tzArg))
+inLunch   = useLunch and not na(time(timeframe.period, lunchTime, tzArg))
+sessOk    = not useSession or (inRth and not inLunch)
+exitedRth = useSession and inRth[1] and not inRth   // first bar after the session ends
 
 // =============================================================================
-// IS / OOS attribution
+// Entries + tick-based TP1 / Breakeven trade management
+// =============================================================================
+tickSize = syminfo.mintick
+tp1Dist  = tp1Ticks * tickSize
+beDist   = beTicks  * tickSize
+
+var float entryPx = na
+var float tp1Px   = na
+var float bePx    = na
+var bool  tp1Hit  = false
+
+newLong  = flipUp and wfOk and sessOk
+newShort = flipDn and wfOk and sessOk
+
+if newLong
+    entryPx := close
+    tp1Px   := close + tp1Dist
+    bePx    := close + beDist
+    tp1Hit  := false
+    strategy.entry("Long",  strategy.long,  comment="Long")
+
+if newShort
+    entryPx := close
+    tp1Px   := close - tp1Dist
+    bePx    := close - beDist
+    tp1Hit  := false
+    strategy.entry("Short", strategy.short, comment="Short")
+
+// Detect TP1 fills intrabar so we can switch the runner to a BE stop.
+if strategy.position_size > 0 and high >= tp1Px
+    tp1Hit := true
+if strategy.position_size < 0 and low  <= tp1Px
+    tp1Hit := true
+if strategy.position_size == 0
+    tp1Hit := false
+
+// Place exits.
+//   * Pre-TP1: limit-only partial at TP1 (no stop -> Supertrend handles reversal)
+//   * Post-TP1: stop-only on the runner at the breakeven price
+if strategy.position_size > 0
+    if tp1Hit and useBE
+        strategy.exit("BE",  from_entry="Long",  stop=bePx,  comment_loss="BE")
+    else if useTp1
+        strategy.exit("TP1", from_entry="Long",  qty_percent=tp1Pct, limit=tp1Px, comment_profit="TP1")
+
+if strategy.position_size < 0
+    if tp1Hit and useBE
+        strategy.exit("BE",  from_entry="Short", stop=bePx,  comment_loss="BE")
+    else if useTp1
+        strategy.exit("TP1", from_entry="Short", qty_percent=tp1Pct, limit=tp1Px, comment_profit="TP1")
+
+// Flatten any open position when the active session ends.
+if flatAtClose and exitedRth and strategy.position_size != 0
+    strategy.close_all(comment="Sess End")
+
+// =============================================================================
+// IS / OOS attribution (one row per closed sub-trade; partial fills count)
 // =============================================================================
 var int   isTrades  = 0
 var int   isWins    = 0
@@ -139,15 +225,31 @@ plot(showSTLine and dir == -1 ? stLine : na, "ST Dn",
 
 barcolor(colorBars ? (dir == 1 ? bullCol : bearCol) : na)
 
-plotshape(showLabels and flipUp and wfOk, title="LONG",  style=shape.labelup,
+plotshape(showLabels and newLong,  title="LONG",  style=shape.labelup,
      location=location.belowbar, color=bullCol, textcolor=color.white,
      text="L", size=size.tiny)
-plotshape(showLabels and flipDn and wfOk, title="SHORT", style=shape.labeldown,
+plotshape(showLabels and newShort, title="SHORT", style=shape.labeldown,
      location=location.abovebar, color=bearCol, textcolor=color.white,
      text="S", size=size.tiny)
 
-bgcolor(useWF and inIS  ? color.new(bullCol, 95)        : na, title="IS Tint")
-bgcolor(useWF and inOOS ? color.new(color.yellow, 95)   : na, title="OOS Tint")
+bgcolor(useWF and inIS  ? color.new(bullCol, 95)      : na, title="IS Tint")
+bgcolor(useWF and inOOS ? color.new(color.yellow, 95) : na, title="OOS Tint")
+
+// TP1 / BE level lines (entry-time levels, redrawn per trade)
+var line tp1Line = na
+var line beLine  = na
+
+if showLevels and (newLong or newShort)
+    line.delete(tp1Line)
+    line.delete(beLine)
+    tp1Line := line.new(bar_index, tp1Px, bar_index + levelLen, tp1Px,
+         color=color.lime,   width=1, style=line.style_dotted)
+    beLine  := line.new(bar_index, bePx,  bar_index + levelLen, bePx,
+         color=color.yellow, width=1, style=line.style_dashed)
+
+// Active runner stop (only visible after TP1 has filled)
+plot(tp1Hit and useBE and strategy.position_size != 0 ? bePx : na, "Runner BE",
+     color=color.new(color.red, 30), style=plot.style_linebr, linewidth=2)
 
 // =============================================================================
 // IS / OOS Metrics Table

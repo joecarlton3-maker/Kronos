@@ -1,0 +1,266 @@
+//@version=5
+// =============================================================================
+// Advanced Supertrend Scalper
+// -----------------------------------------------------------------------------
+// A scalping-oriented Supertrend with:
+//   * Dual Supertrend confirmation (fast + slow)
+//   * Higher Timeframe (HTF) trend filter
+//   * EMA trend filter, RSI momentum filter, and volume spike filter
+//   * ATR-based dynamic Stop Loss and multi-target Take Profits (TP1/TP2/TP3)
+//   * Session filter (skip low-liquidity hours)
+//   * Min ATR % filter (skip dead/choppy markets)
+//   * One-trade-per-bar logic, flip-on-opposite-signal
+//   * Visual SL/TP lines, entry markers, candle coloring, and full alerts
+// =============================================================================
+
+indicator("Advanced Supertrend Scalper", shorttitle="AST Scalper", overlay=true,
+     max_lines_count=500, max_labels_count=500, max_bars_back=2000)
+
+// -----------------------------------------------------------------------------
+// Inputs - Supertrend
+// -----------------------------------------------------------------------------
+grpST = "Supertrend"
+fastLen   = input.int(10,  "Fast ATR Length",        minval=1, group=grpST)
+fastMult  = input.float(2.0, "Fast ATR Multiplier",   minval=0.1, step=0.1, group=grpST)
+slowLen   = input.int(20,  "Slow ATR Length",        minval=1, group=grpST)
+slowMult  = input.float(3.0, "Slow ATR Multiplier",  minval=0.1, step=0.1, group=grpST)
+useSlowConf = input.bool(true, "Require Slow Supertrend Confirmation", group=grpST)
+
+// -----------------------------------------------------------------------------
+// Inputs - Higher Timeframe Trend
+// -----------------------------------------------------------------------------
+grpHTF = "Higher Timeframe Filter"
+useHTF   = input.bool(true,  "Use HTF Supertrend Filter",      group=grpHTF)
+htfRes   = input.timeframe("15", "HTF Resolution",             group=grpHTF)
+htfLen   = input.int(10,  "HTF ATR Length",     minval=1,      group=grpHTF)
+htfMult  = input.float(3.0, "HTF ATR Multiplier", minval=0.1, step=0.1, group=grpHTF)
+
+// -----------------------------------------------------------------------------
+// Inputs - Filters
+// -----------------------------------------------------------------------------
+grpFlt = "Signal Filters"
+useEma     = input.bool(true,  "EMA Trend Filter",                    group=grpFlt)
+emaLen     = input.int(50,    "EMA Length",          minval=2,        group=grpFlt)
+useRsi     = input.bool(true,  "RSI Momentum Filter",                 group=grpFlt)
+rsiLen     = input.int(14,    "RSI Length",          minval=2,        group=grpFlt)
+rsiBull    = input.int(50,    "RSI Bull Threshold",  minval=1, maxval=99, group=grpFlt)
+rsiBear    = input.int(50,    "RSI Bear Threshold",  minval=1, maxval=99, group=grpFlt)
+useVol     = input.bool(true,  "Volume Spike Filter",                 group=grpFlt)
+volLen     = input.int(20,    "Volume MA Length",    minval=1,        group=grpFlt)
+volMult    = input.float(1.2, "Volume Spike Multiplier", minval=0.1, step=0.1, group=grpFlt)
+useMinAtr  = input.bool(true,  "Min ATR% Filter (skip dead markets)", group=grpFlt)
+minAtrPct  = input.float(0.05, "Min ATR % of Price",  minval=0.0, step=0.01, group=grpFlt)
+
+// -----------------------------------------------------------------------------
+// Inputs - Session Filter
+// -----------------------------------------------------------------------------
+grpSess = "Session Filter"
+useSession = input.bool(false, "Use Session Filter",      group=grpSess)
+sessTime   = input.session("0930-1600", "Allowed Session", group=grpSess)
+
+// -----------------------------------------------------------------------------
+// Inputs - Risk / Targets
+// -----------------------------------------------------------------------------
+grpRisk = "Risk & Targets"
+slMult     = input.float(1.5, "Stop Loss ATR Mult",  minval=0.1, step=0.1, group=grpRisk)
+tp1Mult    = input.float(1.0, "TP1 ATR Mult (R:R based on SL)", minval=0.1, step=0.1, group=grpRisk)
+tp2Mult    = input.float(2.0, "TP2 ATR Mult",        minval=0.1, step=0.1, group=grpRisk)
+tp3Mult    = input.float(3.0, "TP3 ATR Mult",        minval=0.1, step=0.1, group=grpRisk)
+showLevels = input.bool(true, "Show SL/TP Levels",   group=grpRisk)
+levelLen   = input.int(20, "Level Line Bars",        minval=1,    group=grpRisk)
+
+// -----------------------------------------------------------------------------
+// Inputs - Visuals
+// -----------------------------------------------------------------------------
+grpViz = "Visuals"
+showSTLines = input.bool(true,  "Plot Supertrend Lines",  group=grpViz)
+colorBars   = input.bool(true,  "Color Bars by Trend",    group=grpViz)
+showSignals = input.bool(true,  "Show Buy/Sell Markers",  group=grpViz)
+bullCol     = input.color(color.new(#26a69a, 0), "Bull Color", group=grpViz)
+bearCol     = input.color(color.new(#ef5350, 0), "Bear Color", group=grpViz)
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+// Manual Supertrend implementation so it can be called inside request.security()
+supertrend(simple int len, simple float mult) =>
+    atrV = ta.atr(len)
+    src  = (high + low) / 2.0
+    upBasic   = src + mult * atrV
+    dnBasic   = src - mult * atrV
+    var float upBand = na
+    var float dnBand = na
+    var int   trnd   = 1
+    upBand := na(upBand[1]) ? upBasic : (upBasic < upBand[1] or close[1] > upBand[1] ? upBasic : upBand[1])
+    dnBand := na(dnBand[1]) ? dnBasic : (dnBasic > dnBand[1] or close[1] < dnBand[1] ? dnBasic : dnBand[1])
+    trnd  := na(trnd[1]) ? 1 :
+             trnd[1] == -1 and close > upBand[1] ? 1 :
+             trnd[1] ==  1 and close < dnBand[1] ? -1 : trnd[1]
+    stLine = trnd == 1 ? dnBand : upBand
+    [stLine, trnd]
+
+// =============================================================================
+// Computations
+// =============================================================================
+[fastST, fastDir] = supertrend(fastLen, fastMult)
+[slowST, slowDir] = supertrend(slowLen, slowMult)
+
+// HTF trend (non-repainting: lookahead off, use confirmed bar)
+htfDir = useHTF ? request.security(syminfo.tickerid, htfRes,
+     supertrend(htfLen, htfMult)[1], lookahead=barmerge.lookahead_off) : 1
+
+// Filters
+emaVal   = ta.ema(close, emaLen)
+rsiVal   = ta.rsi(close, rsiLen)
+volMa    = ta.sma(volume, volLen)
+atrVal   = ta.atr(fastLen)
+atrPct   = (atrVal / close) * 100.0
+
+emaBull  = not useEma or close > emaVal
+emaBear  = not useEma or close < emaVal
+rsiBullOk = not useRsi or rsiVal > rsiBull
+rsiBearOk = not useRsi or rsiVal < rsiBear
+volOk    = not useVol or volume > volMa * volMult
+atrOk    = not useMinAtr or atrPct >= minAtrPct
+sessOk   = not useSession or not na(time(timeframe.period, sessTime))
+
+htfBull  = not useHTF or htfDir ==  1
+htfBear  = not useHTF or htfDir == -1
+
+slowBull = not useSlowConf or slowDir ==  1
+slowBear = not useSlowConf or slowDir == -1
+
+// Raw direction flips
+flipUp   = ta.change(fastDir) ==  2  // -1 -> 1
+flipDn   = ta.change(fastDir) == -2  //  1 -> -1
+
+// Final signals (one per bar, on bar close behavior dependent on alert settings)
+longSig  = flipUp  and slowBull and htfBull and emaBull and rsiBullOk and volOk and atrOk and sessOk
+shortSig = flipDn  and slowBear and htfBear and emaBear and rsiBearOk and volOk and atrOk and sessOk
+
+// =============================================================================
+// Position state for SL/TP visualization
+// =============================================================================
+var int    posDir   = 0
+var float  entryPx  = na
+var float  slPx     = na
+var float  tp1Px    = na
+var float  tp2Px    = na
+var float  tp3Px    = na
+var int    entryBar = na
+
+flipExisting = (posDir == 1 and shortSig) or (posDir == -1 and longSig)
+
+if longSig
+    posDir   := 1
+    entryPx  := close
+    slPx     := close - slMult * atrVal
+    risk     = slMult * atrVal
+    tp1Px    := close + tp1Mult * risk
+    tp2Px    := close + tp2Mult * risk
+    tp3Px    := close + tp3Mult * risk
+    entryBar := bar_index
+
+if shortSig
+    posDir   := -1
+    entryPx  := close
+    slPx     := close + slMult * atrVal
+    risk     = slMult * atrVal
+    tp1Px    := close - tp1Mult * risk
+    tp2Px    := close - tp2Mult * risk
+    tp3Px    := close - tp3Mult * risk
+    entryBar := bar_index
+
+// SL / TP hit detection (informational; closes "position state")
+slHit  = posDir ==  1 and low  <= slPx  or posDir == -1 and high >= slPx
+tpHit  = posDir ==  1 and high >= tp3Px or posDir == -1 and low  <= tp3Px
+if (slHit or tpHit) and not (longSig or shortSig)
+    posDir := 0
+
+// =============================================================================
+// Plots
+// =============================================================================
+plot(showSTLines and fastDir ==  1 ? fastST : na, "Fast ST Up",
+     color=bullCol, linewidth=2, style=plot.style_linebr)
+plot(showSTLines and fastDir == -1 ? fastST : na, "Fast ST Dn",
+     color=bearCol, linewidth=2, style=plot.style_linebr)
+plot(showSTLines and slowDir ==  1 ? slowST : na, "Slow ST Up",
+     color=color.new(bullCol, 50), linewidth=1, style=plot.style_linebr)
+plot(showSTLines and slowDir == -1 ? slowST : na, "Slow ST Dn",
+     color=color.new(bearCol, 50), linewidth=1, style=plot.style_linebr)
+plot(useEma ? emaVal : na, "EMA Filter", color=color.new(color.orange, 0), linewidth=1)
+
+barcolor(colorBars ? (fastDir == 1 ? bullCol : bearCol) : na)
+
+plotshape(showSignals and longSig,  title="BUY",
+     style=shape.labelup,   location=location.belowbar, color=bullCol,
+     textcolor=color.white, text="BUY",  size=size.tiny)
+plotshape(showSignals and shortSig, title="SELL",
+     style=shape.labeldown, location=location.abovebar, color=bearCol,
+     textcolor=color.white, text="SELL", size=size.tiny)
+
+// SL / TP level lines
+var line slLine  = na
+var line tp1Line = na
+var line tp2Line = na
+var line tp3Line = na
+
+drawLevels() =>
+    line.delete(slLine)
+    line.delete(tp1Line)
+    line.delete(tp2Line)
+    line.delete(tp3Line)
+    slLine  := line.new(bar_index, slPx,  bar_index + levelLen, slPx,
+         color=color.red,    width=2, style=line.style_dashed)
+    tp1Line := line.new(bar_index, tp1Px, bar_index + levelLen, tp1Px,
+         color=color.lime,   width=1, style=line.style_dotted)
+    tp2Line := line.new(bar_index, tp2Px, bar_index + levelLen, tp2Px,
+         color=color.green,  width=1, style=line.style_dotted)
+    tp3Line := line.new(bar_index, tp3Px, bar_index + levelLen, tp3Px,
+         color=color.teal,   width=2, style=line.style_dotted)
+
+if showLevels and (longSig or shortSig)
+    drawLevels()
+
+// =============================================================================
+// Alerts
+// =============================================================================
+alertcondition(longSig,  title="Long Entry",
+     message="AST Scalper: LONG {{ticker}} @ {{close}}")
+alertcondition(shortSig, title="Short Entry",
+     message="AST Scalper: SHORT {{ticker}} @ {{close}}")
+alertcondition(flipExisting,                title="Trend Flip")
+alertcondition(posDir == 1  and high >= tp1Px and high[1] < tp1Px, title="Long TP1 Hit")
+alertcondition(posDir == 1  and high >= tp2Px and high[1] < tp2Px, title="Long TP2 Hit")
+alertcondition(posDir == 1  and high >= tp3Px and high[1] < tp3Px, title="Long TP3 Hit")
+alertcondition(posDir == -1 and low  <= tp1Px and low[1]  > tp1Px, title="Short TP1 Hit")
+alertcondition(posDir == -1 and low  <= tp2Px and low[1]  > tp2Px, title="Short TP2 Hit")
+alertcondition(posDir == -1 and low  <= tp3Px and low[1]  > tp3Px, title="Short TP3 Hit")
+alertcondition(posDir == 1  and low  <= slPx,                      title="Long Stop Hit")
+alertcondition(posDir == -1 and high >= slPx,                      title="Short Stop Hit")
+
+// =============================================================================
+// Diagnostic Table
+// =============================================================================
+var table info = table.new(position.top_right, 2, 6,
+     bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(info, 0, 0, "Trend",      text_color=color.white)
+    table.cell(info, 1, 0, fastDir == 1 ? "BULL" : "BEAR",
+         text_color=fastDir == 1 ? bullCol : bearCol)
+    table.cell(info, 0, 1, "HTF",        text_color=color.white)
+    table.cell(info, 1, 1, htfDir == 1 ? "BULL" : "BEAR",
+         text_color=htfDir == 1 ? bullCol : bearCol)
+    table.cell(info, 0, 2, "ATR%",       text_color=color.white)
+    table.cell(info, 1, 2, str.tostring(atrPct, "#.###") + "%",
+         text_color=atrOk ? color.white : color.gray)
+    table.cell(info, 0, 3, "RSI",        text_color=color.white)
+    table.cell(info, 1, 3, str.tostring(rsiVal, "#.##"),
+         text_color=color.white)
+    table.cell(info, 0, 4, "Vol x MA",   text_color=color.white)
+    table.cell(info, 1, 4, str.tostring(volume / volMa, "#.##") + "x",
+         text_color=volOk ? color.white : color.gray)
+    table.cell(info, 0, 5, "Position",   text_color=color.white)
+    table.cell(info, 1, 5, posDir ==  1 ? "LONG" : posDir == -1 ? "SHORT" : "FLAT",
+         text_color=posDir == 1 ? bullCol : posDir == -1 ? bearCol : color.gray)

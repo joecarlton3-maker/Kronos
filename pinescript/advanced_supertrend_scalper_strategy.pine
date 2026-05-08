@@ -1,20 +1,25 @@
 //@version=5
 // =============================================================================
-// Supertrend Strategy (Always In + 3-TP Trade Management)
+// Supertrend Strategy (Always In + 3-TP Trade Management + Filters)
 // -----------------------------------------------------------------------------
-// Always-in Supertrend reversal with tick-based three-leg trade management:
-//   * Enter long on flip up, short on flip down (auto-reverse on next flip)
-//   * TP1 / TP2 / TP3 each take a configurable % off at +/- N ticks from entry
-//   * After TP1 fills, runner stop logic is one of:
-//       - None        -> no hard stop, ride until TP2 or next Supertrend flip
-//       - Breakeven   -> stop at entry +/- buffer ticks
-//       - Chandelier  -> stop at highest-high (long) / lowest-low (short)
-//                        offset by N x ATR; volatility-adaptive, ratchets
-//                        in profit, classic trend-rider trail
-//   * After TP2 fills, runner stop trails with the Supertrend line, ratcheting
-//     against the post-TP1 stop so it never moves backward
-//   * If TP3 doesn't hit, the next Supertrend flip closes the runner
-//   * Optional RTH session window gates new entries
+// Always-in Supertrend reversal with tick-based three-leg trade management,
+// optional entry filters, and a hard initial SL.
+//
+//   Entry side:
+//     * Direction toggle: Both / Long Only / Short Only (forces a close on the
+//       opposite flip when the new direction is blocked)
+//     * ADX trend-strength filter (skip new entries when ADX < threshold)
+//     * RTH session window with optional lunch exclusion
+//
+//   Trade management:
+//     * TP1 / TP2 / TP3 (% splits, distances in ticks)
+//     * Hard initial SL in ticks (caps tail risk pre-TP1)
+//     * Runner stop after TP1: None / Breakeven / Chandelier (ATR trail)
+//     * Supertrend trail kicks in after TP2 (ratchets only in our favor)
+//     * Time stop: close if TP1 isn't reached within N bars
+//
+//   The active runner stop is the cross-bar maximum (long) / minimum (short)
+//   of every active candidate, so the stop can only move in our favor.
 // =============================================================================
 
 strategy("Supertrend Strategy", shorttitle="ST Strat",
@@ -39,6 +44,18 @@ atrLen  = input.int(10,   "ATR Length",     minval=2,   maxval=50,  step=1,   gr
 atrMult = input.float(2.0, "ATR Multiplier", minval=0.5, maxval=5.0, step=0.1, group=grpST)
 
 // -----------------------------------------------------------------------------
+// Inputs - Entry Filters
+// -----------------------------------------------------------------------------
+grpFilt   = "Entry Filters"
+direction = input.string("Both", "Direction",
+     options=["Both", "Long Only", "Short Only"],                                 group=grpFilt,
+     tooltip="Both = always in. Long Only / Short Only force a flat close on the opposite Supertrend flip instead of reversing.")
+useADX    = input.bool(false, "Use ADX Filter",                                   group=grpFilt)
+adxLen    = input.int(14, "ADX Length", minval=2, maxval=50, step=1,              group=grpFilt)
+adxThresh = input.int(20, "Min ADX",    minval=5, maxval=60, step=1,              group=grpFilt,
+     tooltip="Skip new entries when ADX is below this. ~20 is the classic chop threshold; raise to skip more flips.")
+
+// -----------------------------------------------------------------------------
 // Inputs - Targets & Stops (tick-based, three legs)
 // -----------------------------------------------------------------------------
 grpRisk    = "Targets & Stops"
@@ -55,9 +72,13 @@ tp3Ticks   = input.int(32, "TP3 Distance (ticks)",  minval=1, maxval=600, step=1
 tp3Pct     = input.int(34, "TP3 % of Position",     minval=1, maxval=98,  step=1, group=grpRisk,
      tooltip="The three TP percentages should sum to 100. The runner is the TP3 slice.")
 
+useHardSL = input.bool(true, "Hard Initial SL",                                   group=grpRisk)
+slTicks   = input.int(16, "Hard SL Distance (ticks)", minval=1, maxval=1000, step=1, group=grpRisk,
+     tooltip="Initial protective stop in ticks from entry. Stays active until a tighter post-TP1 / post-TP2 stop ratchets above it.")
+
 tp1StopMode = input.string("None", "Runner Stop after TP1",
      options=["None", "Breakeven", "Chandelier"],                                 group=grpRisk,
-     tooltip="What stop to apply to the runner once TP1 fills:\nNone = no hard stop, ride until TP2 or Supertrend flip.\nBreakeven = entry +/- buffer ticks.\nChandelier = highest-high / lowest-low offset by N x ATR; volatility-adaptive trail.")
+     tooltip="What stop to apply to the runner once TP1 fills:\nNone = no extra stop, hard SL still applies if enabled.\nBreakeven = entry +/- buffer ticks.\nChandelier = highest-high / lowest-low offset by N x ATR; volatility-adaptive trail.")
 beTicks    = input.int(1,  "Breakeven Buffer (ticks)", minval=0, maxval=50, step=1, group=grpRisk,
      tooltip="Used when Runner Stop = Breakeven. Offset from entry. 0 = exact entry. Positive locks in N ticks of profit.")
 chandLen   = input.int(14, "Chandelier ATR Length",    minval=2, maxval=50, step=1, group=grpRisk,
@@ -67,6 +88,11 @@ chandMult  = input.float(3.0, "Chandelier ATR Multiplier", minval=0.5, maxval=8.
 
 trailOnTp2 = input.bool(true, "Trail Runner SL with Supertrend after TP2",        group=grpRisk,
      tooltip="When on, after TP2 fills the runner trails the Supertrend line, ratcheting against the post-TP1 stop so it never moves backward.")
+
+useTimeStop  = input.bool(false, "Time Stop (close if no TP1 hit)",               group=grpRisk)
+timeStopBars = input.int(30, "Bars Without TP1 Hit",  minval=1, maxval=500, step=1, group=grpRisk,
+     tooltip="If TP1 hasn't been reached within this many bars after entry, close the trade as a no-progress flat-liner.")
+
 showLevels = input.bool(true, "Show TP / Stop Levels",                            group=grpRisk)
 levelLen   = input.int(20, "Level Line Bars",        minval=1, maxval=200, step=1, group=grpRisk)
 
@@ -95,6 +121,14 @@ bullCol    = input.color(color.new(#26a69a, 0), "Bull Color",                   
 bearCol    = input.color(color.new(#ef5350, 0), "Bear Color",                     group=grpViz)
 
 // =============================================================================
+// Helpers
+// =============================================================================
+ratchetUp(float a, float b) =>
+    na(a) ? b : na(b) ? a : math.max(a, b)
+ratchetDn(float a, float b) =>
+    na(a) ? b : na(b) ? a : math.min(a, b)
+
+// =============================================================================
 // Supertrend
 // =============================================================================
 supertrend(simple int len, simple float mult) =>
@@ -118,6 +152,17 @@ supertrend(simple int len, simple float mult) =>
 flipUp = ta.change(dir) ==  2
 flipDn = ta.change(dir) == -2
 
+// =============================================================================
+// Filters
+// =============================================================================
+// ADX trend-strength filter
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+adxOk = not useADX or adxVal >= adxThresh
+
+// Direction filter
+allowLong  = direction != "Short Only"
+allowShort = direction != "Long Only"
+
 // Session gate (RTH window with optional lunch exclusion)
 tzArg     = sessTz == "exchange" ? syminfo.timezone : sessTz
 inRth     = not na(time(timeframe.period, sessTime,  tzArg))
@@ -128,31 +173,35 @@ exitedRth = useSession and inRth[1] and not inRth   // first bar after the sessi
 // =============================================================================
 // Entries + tick-based 3-TP trade management
 // =============================================================================
-tickSize   = syminfo.mintick
-tp1Dist    = tp1Ticks * tickSize
-tp2Dist    = tp2Ticks * tickSize
-tp3Dist    = tp3Ticks * tickSize
-beDist     = beTicks  * tickSize
-chandATR   = ta.atr(chandLen)
-chandDist  = chandMult * chandATR
+tickSize  = syminfo.mintick
+tp1Dist   = tp1Ticks * tickSize
+tp2Dist   = tp2Ticks * tickSize
+tp3Dist   = tp3Ticks * tickSize
+slDist    = slTicks  * tickSize
+beDist    = beTicks  * tickSize
+chandATR  = ta.atr(chandLen)
+chandDist = chandMult * chandATR
 
 var float entryPx = na
 var float tp1Px   = na
 var float tp2Px   = na
 var float tp3Px   = na
+var float slPx    = na
 var float bePx    = na
 var bool  tp1Hit  = false
 var bool  tp2Hit  = false
 var bool  tp3Hit  = false
+var int   barsInPos = 0
 
-newLong  = flipUp and sessOk
-newShort = flipDn and sessOk
+newLong  = flipUp and sessOk and adxOk and allowLong
+newShort = flipDn and sessOk and adxOk and allowShort
 
 if newLong
     entryPx := close
     tp1Px   := close + tp1Dist
     tp2Px   := close + tp2Dist
     tp3Px   := close + tp3Dist
+    slPx    := close - slDist
     bePx    := close + beDist
     tp1Hit  := false
     tp2Hit  := false
@@ -164,25 +213,29 @@ if newShort
     tp1Px   := close - tp1Dist
     tp2Px   := close - tp2Dist
     tp3Px   := close - tp3Dist
+    slPx    := close + slDist
     bePx    := close - beDist
     tp1Hit  := false
     tp2Hit  := false
     tp3Hit  := false
     strategy.entry("Short", strategy.short, comment="Short")
 
-// Track highest-high / lowest-low since position opened (for tick trail).
+// Track highest-high / lowest-low since position opened (for chandelier).
 var float runHi = na
 var float runLo = na
 posJustOpened = strategy.position_size != 0 and strategy.position_size[1] == 0
 if posJustOpened
     runHi := high
     runLo := low
+    barsInPos := 0
 else if strategy.position_size != 0
     runHi := math.max(nz(runHi, high), high)
     runLo := math.min(nz(runLo, low),  low)
+    barsInPos := barsInPos + 1
 else
     runHi := na
     runLo := na
+    barsInPos := 0
 
 // Detect TP fills intrabar so we can advance the runner stop.
 if strategy.position_size > 0
@@ -204,21 +257,38 @@ if strategy.position_size == 0
     tp2Hit := false
     tp3Hit := false
 
-// Post-TP1 runner stop (mode-dependent). 'na' means no hard stop yet.
-chandLongPx      = na(runHi) ? na : runHi - chandDist
-chandShortPx     = na(runLo) ? na : runLo + chandDist
-postTp1LongStop  = tp1Hit and tp1StopMode == "Breakeven" ? bePx : tp1Hit and tp1StopMode == "Chandelier" ? chandLongPx  : na
-postTp1ShortStop = tp1Hit and tp1StopMode == "Breakeven" ? bePx : tp1Hit and tp1StopMode == "Chandelier" ? chandShortPx : na
+// -----------------------------------------------------------------------------
+// Stop computation: combine all active candidates, then ratchet across bars
+// -----------------------------------------------------------------------------
+hardSlLong   = useHardSL ? slPx : na
+hardSlShort  = useHardSL ? slPx : na
+chandLongPx  = na(runHi) ? na : runHi - chandDist
+chandShortPx = na(runLo) ? na : runLo + chandDist
+postTp1Long  = tp1Hit and tp1StopMode == "Breakeven" ? bePx : tp1Hit and tp1StopMode == "Chandelier" ? chandLongPx  : na
+postTp1Short = tp1Hit and tp1StopMode == "Breakeven" ? bePx : tp1Hit and tp1StopMode == "Chandelier" ? chandShortPx : na
+trailLong    = trailOnTp2 and tp2Hit ? stLine : na
+trailShort   = trailOnTp2 and tp2Hit ? stLine : na
 
-// Post-TP2: Supertrend trail, ratcheting against the post-TP1 stop so it
-// can only move in our favor (never gives back locked-in protection).
-trailLongFloor   = na(postTp1LongStop)  ? entryPx : postTp1LongStop
-trailShortFloor  = na(postTp1ShortStop) ? entryPx : postTp1ShortStop
-longStop  = trailOnTp2 and tp2Hit ? math.max(stLine, trailLongFloor)  : postTp1LongStop
-shortStop = trailOnTp2 and tp2Hit ? math.min(stLine, trailShortFloor) : postTp1ShortStop
+longStopBar  = ratchetUp(ratchetUp(hardSlLong,  postTp1Long),  trailLong)
+shortStopBar = ratchetDn(ratchetDn(hardSlShort, postTp1Short), trailShort)
 
-// Place the three bracket exits each bar. Pine treats already-filled exits as
-// no-ops and just refreshes the live ones with the current dynamic stop.
+// Cross-bar ratchet: stop only moves in our favor.
+var float longStop  = na
+var float shortStop = na
+if posJustOpened
+    longStop  := longStopBar
+    shortStop := shortStopBar
+else if strategy.position_size > 0
+    longStop  := ratchetUp(longStop, longStopBar)
+else if strategy.position_size < 0
+    shortStop := ratchetDn(shortStop, shortStopBar)
+else
+    longStop  := na
+    shortStop := na
+
+// -----------------------------------------------------------------------------
+// Place the three bracket exits each bar.
+// -----------------------------------------------------------------------------
 if strategy.position_size > 0
     if useTp1
         strategy.exit("X1", from_entry="Long", qty_percent=tp1Pct, limit=tp1Px, stop=longStop, comment_profit="TP1", comment_loss="Stop")
@@ -234,6 +304,22 @@ if strategy.position_size < 0
         strategy.exit("X2", from_entry="Short", qty_percent=tp2Pct, limit=tp2Px, stop=shortStop, comment_profit="TP2", comment_loss="Stop")
     if useTp3
         strategy.exit("X3", from_entry="Short", qty_percent=tp3Pct, limit=tp3Px, stop=shortStop, comment_profit="TP3", comment_loss="Stop")
+
+// -----------------------------------------------------------------------------
+// Time stop: close trades that fail to reach TP1 within N bars.
+// -----------------------------------------------------------------------------
+if useTimeStop and strategy.position_size != 0 and not tp1Hit and barsInPos >= timeStopBars
+    strategy.close_all(comment="Time")
+
+// -----------------------------------------------------------------------------
+// Direction filter forces a flat close on the opposite Supertrend flip.
+// (Without this the position would just keep running since the auto-reverse
+//  entry is suppressed.)
+// -----------------------------------------------------------------------------
+if flipDn and not allowShort and strategy.position_size > 0
+    strategy.close_all(comment="Flip")
+if flipUp and not allowLong and strategy.position_size < 0
+    strategy.close_all(comment="Flip")
 
 // Flatten any open position when the active session ends.
 if flatAtClose and exitedRth and strategy.position_size != 0
@@ -256,17 +342,18 @@ plotshape(showLabels and newShort, title="SHORT", style=shape.labeldown,
      location=location.abovebar, color=bearCol, textcolor=color.white,
      text="S", size=size.tiny)
 
-// TP1 / TP2 / TP3 / BE level lines (entry-time, redrawn per trade).
-// BE line is only meaningful in Breakeven mode; skip it otherwise.
+// TP1 / TP2 / TP3 / SL / BE level lines (entry-time, redrawn per trade).
 var line tp1Line = na
 var line tp2Line = na
 var line tp3Line = na
+var line slLine  = na
 var line beLine  = na
 
 if showLevels and (newLong or newShort)
     line.delete(tp1Line)
     line.delete(tp2Line)
     line.delete(tp3Line)
+    line.delete(slLine)
     line.delete(beLine)
     if useTp1
         tp1Line := line.new(bar_index, tp1Px, bar_index + levelLen, tp1Px,
@@ -277,11 +364,14 @@ if showLevels and (newLong or newShort)
     if useTp3
         tp3Line := line.new(bar_index, tp3Px, bar_index + levelLen, tp3Px,
              color=color.teal,   width=2, style=line.style_dotted)
+    if useHardSL
+        slLine  := line.new(bar_index, slPx,  bar_index + levelLen, slPx,
+             color=color.red,    width=2, style=line.style_dashed)
     if tp1StopMode == "Breakeven"
         beLine  := line.new(bar_index, bePx,  bar_index + levelLen, bePx,
              color=color.yellow, width=1, style=line.style_dashed)
 
-// Active runner stop (visible only after it becomes non-na, i.e. post-TP1)
+// Active runner stop (live ratcheted value; visible whenever in position with a stop)
 plot(strategy.position_size > 0 ? longStop  : na, "Long Stop",
      color=color.new(color.red, 30), style=plot.style_linebr, linewidth=2)
 plot(strategy.position_size < 0 ? shortStop : na, "Short Stop",

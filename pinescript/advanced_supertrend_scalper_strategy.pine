@@ -1,9 +1,9 @@
 //@version=5
 // =============================================================================
-// Supertrend Strategy (Always In + 3-TP Trade Management + Filters)
+// Supertrend Strategy (Always In + 3-TP Trade Management + Filters + Risk Mgmt)
 // -----------------------------------------------------------------------------
 // Always-in Supertrend reversal with ATR-scaled three-leg trade management,
-// optional entry filters, and a hard initial SL.
+// optional entry filters, hard initial SL, and a production risk framework.
 //
 //   Entry side:
 //     * Direction toggles: Enable Long Trades / Enable Short Trades (force a
@@ -19,6 +19,15 @@
 //     * Supertrend trail kicks in after TP2 (ratchets only in our favor)
 //     * Time stop: close if TP1 isn't reached within N bars
 //
+//   Risk framework (production-grade hardening for live capital):
+//     * Position sizing: Fixed Contracts or Risk-Based (qty derived from
+//       account equity x risk% / hard-SL dollar risk per contract)
+//     * Daily loss limit: flatten and halt new entries when day P&L hits -$X
+//     * Max trades per day: hard cap on flip-fest exposure
+//     * Two configurable news blackout windows: flatten and block during
+//       known scheduled events (default presets cover 08:30 ET data and
+//       14:00 ET FOMC)
+//
 //   The active runner stop is the cross-bar maximum (long) / minimum (short)
 //   of every active candidate, so the stop can only move in our favor.
 // =============================================================================
@@ -26,8 +35,8 @@
 strategy("Supertrend Strategy", shorttitle="ST Strat",
      overlay              = true,
      initial_capital      = 10000,
-     default_qty_type     = strategy.percent_of_equity,
-     default_qty_value    = 10,
+     default_qty_type     = strategy.fixed,
+     default_qty_value    = 1,
      pyramiding           = 0,
      commission_type      = strategy.commission.cash_per_order,
      commission_value     = 0,
@@ -61,28 +70,28 @@ adxThresh = input.int(30, "Min ADX",    minval=5, maxval=60, step=1,            
 // -----------------------------------------------------------------------------
 grpRisk    = "Targets & Stops"
 useTp1     = input.bool(true, "Enable TP1",                                       group=grpRisk)
-tp1Mult    = input.float(0.8, "TP1 Distance (x ATR)", minval=0.1, maxval=10.0, step=0.1, group=grpRisk,
-     tooltip="Take-profit distance as a multiple of ATR(atrLen). Volatility-adaptive: scales naturally across symbols and timeframes.")
+tp1Mult    = input.float(0.08, "TP1 Distance (x ATR)", minval=0.01, maxval=5.0, step=0.01, group=grpRisk,
+     tooltip="Take-profit distance as a multiple of ATR(atrLen). Volatility-adaptive: scales naturally across symbols and timeframes. Champion 0.08 on NQ 3m (~8 ticks at ATR ~= 99 ticks).")
 tp1Pct     = input.int(33, "TP1 % of Position",      minval=1,   maxval=98,  step=1, group=grpRisk)
 
 useTp2     = input.bool(true, "Enable TP2",                                       group=grpRisk)
-tp2Mult    = input.float(1.6, "TP2 Distance (x ATR)", minval=0.1, maxval=15.0, step=0.1, group=grpRisk)
+tp2Mult    = input.float(0.16, "TP2 Distance (x ATR)", minval=0.01, maxval=10.0, step=0.01, group=grpRisk)
 tp2Pct     = input.int(33, "TP2 % of Position",      minval=1,   maxval=98,  step=1, group=grpRisk)
 
 useTp3     = input.bool(true, "Enable TP3",                                       group=grpRisk)
-tp3Mult    = input.float(3.2, "TP3 Distance (x ATR)", minval=0.1, maxval=20.0, step=0.1, group=grpRisk)
+tp3Mult    = input.float(0.32, "TP3 Distance (x ATR)", minval=0.01, maxval=15.0, step=0.01, group=grpRisk)
 tp3Pct     = input.int(34, "TP3 % of Position",      minval=1,   maxval=98,  step=1, group=grpRisk,
      tooltip="The three TP percentages should sum to 100. The runner is the TP3 slice.")
 
 useHardSL = input.bool(true, "Hard Initial SL",                                   group=grpRisk)
-slMult    = input.float(4.0, "Hard SL Distance (x ATR)", minval=0.1, maxval=20.0, step=0.1, group=grpRisk,
-     tooltip="Initial protective stop in ATR multiples. Stays active until a tighter post-TP1 / post-TP2 stop ratchets above it. ~4 ATR was the 1-year champion on NQ 3m (40 ticks at ATR ~= 10 ticks).")
+slMult    = input.float(0.30, "Hard SL Distance (x ATR)", minval=0.01, maxval=10.0, step=0.01, group=grpRisk,
+     tooltip="Initial protective stop in ATR multiples. Stays active until a tighter post-TP1 / post-TP2 stop ratchets above it. Corrected 1-year NQ 3m champion: 0.30 (~30 ticks at ATR ~= 99 ticks; PF 1.415).")
 
 tp1StopMode = input.string("Breakeven", "Runner Stop after TP1",
      options=["None", "Breakeven", "Chandelier"],                                 group=grpRisk,
      tooltip="What stop to apply to the runner once TP1 fills:\nNone = no extra stop, hard SL still applies if enabled.\nBreakeven = entry +/- buffer (ATR multiple).\nChandelier = highest-high / lowest-low offset by N x ATR; volatility-adaptive trail.")
-beMult     = input.float(0.1, "Breakeven Buffer (x ATR)", minval=0.0, maxval=5.0, step=0.05, group=grpRisk,
-     tooltip="Used when Runner Stop = Breakeven. Offset from entry as ATR multiple. 0 = exact entry. Positive locks in profit; covers commissions/slippage.")
+beMult     = input.float(0.01, "Breakeven Buffer (x ATR)", minval=0.0, maxval=2.0, step=0.005, group=grpRisk,
+     tooltip="Used when Runner Stop = Breakeven. Offset from entry as ATR multiple. 0 = exact entry. Positive locks in profit; covers commissions/slippage. ~0.01 ATR ~= 1 tick on NQ 3m.")
 chandLen   = input.int(7, "Chandelier ATR Length",     minval=2, maxval=50, step=1, group=grpRisk,
      tooltip="Used when Runner Stop = Chandelier. Default tightened to 7 for sub-5m scalping (14 was too loose on 3m NQ).")
 chandMult  = input.float(1.5, "Chandelier ATR Multiplier", minval=0.5, maxval=8.0, step=0.1, group=grpRisk,
@@ -111,6 +120,33 @@ sessTz     = input.string("America/New_York", "Session Timezone",               
      options=["America/New_York", "America/Chicago", "Europe/London", "Asia/Tokyo", "exchange"])
 flatAtClose = input.bool(true, "Flatten Position at Session Close",               group=grpSess,
      tooltip="When on, any open position is closed when the bar exits the active session.")
+
+// -----------------------------------------------------------------------------
+// Inputs - Risk Management (production hardening)
+// -----------------------------------------------------------------------------
+grpMgmt = "Risk Management"
+sizingMode = input.string("Fixed Contracts", "Position Sizing",
+     options=["Fixed Contracts", "Risk-Based"],                                   group=grpMgmt,
+     tooltip="Fixed Contracts = constant qty per trade.\nRisk-Based = qty derived from Risk % of equity divided by the dollar risk per contract on the hard SL. Requires Hard Initial SL to be on.")
+fixedQty   = input.int(1, "Contracts per Trade",   minval=1, maxval=100, step=1,  group=grpMgmt,
+     tooltip="Used when Position Sizing = Fixed Contracts.")
+riskPct    = input.float(1.0, "Risk % per Trade",  minval=0.05, maxval=10.0, step=0.05, group=grpMgmt,
+     tooltip="Used when Position Sizing = Risk-Based. Caps dollar risk per trade as a percent of current equity. qty = floor(equity * risk%/100 / (slDist * pointvalue)).")
+
+useDailyLoss = input.bool(true, "Daily Loss Limit",                               group=grpMgmt)
+maxDailyLoss = input.float(500, "Max Daily Loss ($)", minval=50, maxval=20000, step=50, group=grpMgmt,
+     tooltip="When today's session P&L hits -$X, flatten any open position and block new entries until the next session start. Single most important risk control for live trading.")
+
+useMaxTrades = input.bool(false, "Max Trades per Day",                            group=grpMgmt)
+maxTrades    = input.int(20, "Max Trades", minval=1, maxval=200, step=1,          group=grpMgmt,
+     tooltip="Hard cap on entries per session. Useful in choppy regimes where flip-fests would otherwise erode the edge.")
+
+useBlackout1 = input.bool(false, "Blackout Window 1 (e.g. CPI/NFP)",              group=grpMgmt)
+blackout1    = input.session("0828-0832", "Window 1",                             group=grpMgmt,
+     tooltip="No new entries during this window; any open position is flattened. Default brackets the 8:30 ET economic data drop.")
+useBlackout2 = input.bool(false, "Blackout Window 2 (e.g. FOMC)",                 group=grpMgmt)
+blackout2    = input.session("1358-1432", "Window 2",                             group=grpMgmt,
+     tooltip="Default brackets the 14:00 ET FOMC announcement and immediate aftermath.")
 
 // -----------------------------------------------------------------------------
 // Inputs - Visuals
@@ -173,6 +209,29 @@ sessOk    = not useSession or (inRth and not inLunch)
 exitedRth = useSession and inRth[1] and not inRth   // first bar after the session ends
 
 // =============================================================================
+// Risk management state (per-day P&L tracking, blackouts, sizing)
+// =============================================================================
+// Day boundary: prefer first bar of active RTH session, fall back to date change
+sessionStart  = useSession and inRth and not inRth[1]
+calendarStart = not useSession and ta.change(dayofyear) != 0
+isNewDay      = sessionStart or calendarStart or barstate.isfirst
+
+var float dayStartEquity = na
+var int   dayTradeCount  = 0
+if isNewDay
+    dayStartEquity := strategy.equity
+    dayTradeCount  := 0
+
+dailyPnL     = strategy.equity - nz(dayStartEquity, strategy.equity)
+dailyLossHit = useDailyLoss and dailyPnL <= -maxDailyLoss
+maxTradesOk  = not useMaxTrades or dayTradeCount < maxTrades
+
+// News blackout windows
+inBlackout1  = useBlackout1 and not na(time(timeframe.period, blackout1, tzArg))
+inBlackout2  = useBlackout2 and not na(time(timeframe.period, blackout2, tzArg))
+inBlackout   = inBlackout1 or inBlackout2
+
+// =============================================================================
 // Entries + tick-based 3-TP trade management
 // =============================================================================
 // All risk distances are ATR multiples of the same supertrend ATR, so they
@@ -197,8 +256,18 @@ var bool  tp2Hit  = false
 var bool  tp3Hit  = false
 var int   barsInPos = 0
 
-newLong  = flipUp and sessOk and adxOk and allowLong
-newShort = flipDn and sessOk and adxOk and allowShort
+// Position sizing: Risk-Based qty derived from hard SL dollar risk per contract.
+// Falls back to fixedQty if hard SL is off (no meaningful risk to size against).
+slRiskPx        = useHardSL ? slDist : (4.0 * atrRisk)
+riskPerContract = slRiskPx * syminfo.pointvalue
+riskDollars     = strategy.equity * (riskPct / 100.0)
+qtyComputed     = riskPerContract > 0 ? math.max(1, math.floor(riskDollars / riskPerContract)) : fixedQty
+qty             = sizingMode == "Risk-Based" ? qtyComputed : fixedQty
+
+// Combined entry gate: signal + filters + risk caps
+canTrade = sessOk and adxOk and not dailyLossHit and not inBlackout and maxTradesOk
+newLong  = flipUp and canTrade and allowLong
+newShort = flipDn and canTrade and allowShort
 
 if newLong
     entryPx := close
@@ -210,7 +279,8 @@ if newLong
     tp1Hit  := false
     tp2Hit  := false
     tp3Hit  := false
-    strategy.entry("Long",  strategy.long,  comment="Long")
+    dayTradeCount := dayTradeCount + 1
+    strategy.entry("Long",  strategy.long,  qty=qty, comment="Long")
 
 if newShort
     entryPx := close
@@ -222,7 +292,8 @@ if newShort
     tp1Hit  := false
     tp2Hit  := false
     tp3Hit  := false
-    strategy.entry("Short", strategy.short, comment="Short")
+    dayTradeCount := dayTradeCount + 1
+    strategy.entry("Short", strategy.short, qty=qty, comment="Short")
 
 // Track highest-high / lowest-low since position opened (for chandelier).
 var float runHi = na
@@ -314,6 +385,15 @@ if strategy.position_size < 0
 // -----------------------------------------------------------------------------
 if useTimeStop and strategy.position_size != 0 and not tp1Hit and barsInPos >= timeStopBars
     strategy.close_all(comment="Time")
+
+// -----------------------------------------------------------------------------
+// Risk circuit breakers: daily loss limit + scheduled-event blackouts.
+// These run before the direction-filter close so they can't be missed.
+// -----------------------------------------------------------------------------
+if dailyLossHit and strategy.position_size != 0
+    strategy.close_all(comment="DLL")
+if inBlackout and strategy.position_size != 0
+    strategy.close_all(comment="News")
 
 // -----------------------------------------------------------------------------
 // Direction filter forces a flat close on the opposite Supertrend flip.

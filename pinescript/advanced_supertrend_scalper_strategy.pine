@@ -213,7 +213,7 @@ exitedRth = useSession and inRth[1] and not inRth   // first bar after the sessi
 // =============================================================================
 // Day boundary: prefer first bar of active RTH session, fall back to date change
 sessionStart  = useSession and inRth and not inRth[1]
-calendarStart = not useSession and ta.change(dayofyear) != 0
+calendarStart = not useSession and ta.change(time("D")) != 0
 isNewDay      = sessionStart or calendarStart or barstate.isfirst
 
 var float dayStartEquity = na

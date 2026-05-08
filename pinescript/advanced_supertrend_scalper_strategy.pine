@@ -6,8 +6,8 @@
 // optional entry filters, and a hard initial SL.
 //
 //   Entry side:
-//     * Direction toggle: Both / Long Only / Short Only (forces a close on the
-//       opposite flip when the new direction is blocked)
+//     * Direction toggles: Enable Long Trades / Enable Short Trades (force a
+//       flat close on the opposite flip when the new direction is disabled)
 //     * ADX trend-strength filter (skip new entries when ADX < threshold)
 //     * RTH session window with optional lunch exclusion
 //
@@ -46,10 +46,10 @@ atrMult = input.float(2.0, "ATR Multiplier", minval=0.5, maxval=5.0, step=0.1, g
 // -----------------------------------------------------------------------------
 // Inputs - Entry Filters
 // -----------------------------------------------------------------------------
-grpFilt   = "Entry Filters"
-direction = input.string("Both", "Direction",
-     options=["Both", "Long Only", "Short Only"],                                 group=grpFilt,
-     tooltip="Both = always in. Long Only / Short Only force a flat close on the opposite Supertrend flip instead of reversing.")
+grpFilt    = "Entry Filters"
+enableLong  = input.bool(true, "Enable Long Trades",                              group=grpFilt)
+enableShort = input.bool(true, "Enable Short Trades",                             group=grpFilt,
+     tooltip="Disable to force a flat close on opposite Supertrend flips instead of reversing into the disabled direction. Disable both to halt all entries.")
 useADX    = input.bool(true, "Use ADX Filter",                                    group=grpFilt)
 adxLen    = input.int(14, "ADX Length", minval=2, maxval=50, step=1,              group=grpFilt)
 adxThresh = input.int(30, "Min ADX",    minval=5, maxval=60, step=1,              group=grpFilt,
@@ -159,9 +159,9 @@ flipDn = ta.change(dir) == -2
 [diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
 adxOk = not useADX or adxVal >= adxThresh
 
-// Direction filter
-allowLong  = direction != "Short Only"
-allowShort = direction != "Long Only"
+// Direction filter (boolean toggles - robust to optimizer string-handling quirks)
+allowLong  = enableLong
+allowShort = enableShort
 
 // Session gate (RTH window with optional lunch exclusion)
 tzArg     = sessTz == "exchange" ? syminfo.timezone : sessTz

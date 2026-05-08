@@ -52,8 +52,8 @@ direction = input.string("Both", "Direction",
      tooltip="Both = always in. Long Only / Short Only force a flat close on the opposite Supertrend flip instead of reversing.")
 useADX    = input.bool(true, "Use ADX Filter",                                    group=grpFilt)
 adxLen    = input.int(14, "ADX Length", minval=2, maxval=50, step=1,              group=grpFilt)
-adxThresh = input.int(25, "Min ADX",    minval=5, maxval=60, step=1,              group=grpFilt,
-     tooltip="Skip new entries when ADX is below this. ~20 is the classic chop threshold; 25 was the optimization champion on NQ 3m.")
+adxThresh = input.int(30, "Min ADX",    minval=5, maxval=60, step=1,              group=grpFilt,
+     tooltip="Skip new entries when ADX is below this. ~20 is the classic chop threshold; 30 was the optimization champion on NQ 3m over a 1-year window.")
 
 // -----------------------------------------------------------------------------
 // Inputs - Targets & Stops (tick-based, three legs)
@@ -73,8 +73,8 @@ tp3Pct     = input.int(34, "TP3 % of Position",     minval=1, maxval=98,  step=1
      tooltip="The three TP percentages should sum to 100. The runner is the TP3 slice.")
 
 useHardSL = input.bool(true, "Hard Initial SL",                                   group=grpRisk)
-slTicks   = input.int(12, "Hard SL Distance (ticks)", minval=1, maxval=1000, step=1, group=grpRisk,
-     tooltip="Initial protective stop in ticks from entry. Stays active until a tighter post-TP1 / post-TP2 stop ratchets above it.")
+slTicks   = input.int(40, "Hard SL Distance (ticks)", minval=1, maxval=1000, step=1, group=grpRisk,
+     tooltip="Initial protective stop in ticks from entry. Stays active until a tighter post-TP1 / post-TP2 stop ratchets above it. 40t was the 1-year champion on NQ 3m - wider SL gave runners more room to develop before being tagged by intra-trade noise.")
 
 tp1StopMode = input.string("Breakeven", "Runner Stop after TP1",
      options=["None", "Breakeven", "Chandelier"],                                 group=grpRisk,

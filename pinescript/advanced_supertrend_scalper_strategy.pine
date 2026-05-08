@@ -50,10 +50,10 @@ grpFilt   = "Entry Filters"
 direction = input.string("Both", "Direction",
      options=["Both", "Long Only", "Short Only"],                                 group=grpFilt,
      tooltip="Both = always in. Long Only / Short Only force a flat close on the opposite Supertrend flip instead of reversing.")
-useADX    = input.bool(false, "Use ADX Filter",                                   group=grpFilt)
+useADX    = input.bool(true, "Use ADX Filter",                                    group=grpFilt)
 adxLen    = input.int(14, "ADX Length", minval=2, maxval=50, step=1,              group=grpFilt)
-adxThresh = input.int(20, "Min ADX",    minval=5, maxval=60, step=1,              group=grpFilt,
-     tooltip="Skip new entries when ADX is below this. ~20 is the classic chop threshold; raise to skip more flips.")
+adxThresh = input.int(25, "Min ADX",    minval=5, maxval=60, step=1,              group=grpFilt,
+     tooltip="Skip new entries when ADX is below this. ~20 is the classic chop threshold; 25 was the optimization champion on NQ 3m.")
 
 // -----------------------------------------------------------------------------
 // Inputs - Targets & Stops (tick-based, three legs)
@@ -73,18 +73,18 @@ tp3Pct     = input.int(34, "TP3 % of Position",     minval=1, maxval=98,  step=1
      tooltip="The three TP percentages should sum to 100. The runner is the TP3 slice.")
 
 useHardSL = input.bool(true, "Hard Initial SL",                                   group=grpRisk)
-slTicks   = input.int(16, "Hard SL Distance (ticks)", minval=1, maxval=1000, step=1, group=grpRisk,
+slTicks   = input.int(12, "Hard SL Distance (ticks)", minval=1, maxval=1000, step=1, group=grpRisk,
      tooltip="Initial protective stop in ticks from entry. Stays active until a tighter post-TP1 / post-TP2 stop ratchets above it.")
 
-tp1StopMode = input.string("None", "Runner Stop after TP1",
+tp1StopMode = input.string("Breakeven", "Runner Stop after TP1",
      options=["None", "Breakeven", "Chandelier"],                                 group=grpRisk,
      tooltip="What stop to apply to the runner once TP1 fills:\nNone = no extra stop, hard SL still applies if enabled.\nBreakeven = entry +/- buffer ticks.\nChandelier = highest-high / lowest-low offset by N x ATR; volatility-adaptive trail.")
 beTicks    = input.int(1,  "Breakeven Buffer (ticks)", minval=0, maxval=50, step=1, group=grpRisk,
      tooltip="Used when Runner Stop = Breakeven. Offset from entry. 0 = exact entry. Positive locks in N ticks of profit.")
-chandLen   = input.int(14, "Chandelier ATR Length",    minval=2, maxval=50, step=1, group=grpRisk,
-     tooltip="Used when Runner Stop = Chandelier.")
-chandMult  = input.float(3.0, "Chandelier ATR Multiplier", minval=0.5, maxval=8.0, step=0.1, group=grpRisk,
-     tooltip="Used when Runner Stop = Chandelier. Stop = highest-high (long) / lowest-low (short) offset by this many ATRs.")
+chandLen   = input.int(7, "Chandelier ATR Length",     minval=2, maxval=50, step=1, group=grpRisk,
+     tooltip="Used when Runner Stop = Chandelier. Default tightened to 7 for sub-5m scalping (14 was too loose on 3m NQ).")
+chandMult  = input.float(1.5, "Chandelier ATR Multiplier", minval=0.5, maxval=8.0, step=0.1, group=grpRisk,
+     tooltip="Used when Runner Stop = Chandelier. Stop = highest-high (long) / lowest-low (short) offset by this many ATRs. Default tightened to 1.5 for sub-5m scalping.")
 
 trailOnTp2 = input.bool(true, "Trail Runner SL with Supertrend after TP2",        group=grpRisk,
      tooltip="When on, after TP2 fills the runner trails the Supertrend line, ratcheting against the post-TP1 stop so it never moves backward.")

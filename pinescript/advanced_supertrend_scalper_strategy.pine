@@ -2,7 +2,7 @@
 // =============================================================================
 // Supertrend Strategy (Always In + 3-TP Trade Management + Filters)
 // -----------------------------------------------------------------------------
-// Always-in Supertrend reversal with tick-based three-leg trade management,
+// Always-in Supertrend reversal with ATR-scaled three-leg trade management,
 // optional entry filters, and a hard initial SL.
 //
 //   Entry side:
@@ -11,9 +11,10 @@
 //     * ADX trend-strength filter (skip new entries when ADX < threshold)
 //     * RTH session window with optional lunch exclusion
 //
-//   Trade management:
-//     * TP1 / TP2 / TP3 (% splits, distances in ticks)
-//     * Hard initial SL in ticks (caps tail risk pre-TP1)
+//   Trade management (all distances scale with ATR(atrLen) so parameters
+//   generalize across instruments and timeframes):
+//     * TP1 / TP2 / TP3 distances as ATR multiples, with % splits
+//     * Hard initial SL as an ATR multiple (caps tail risk pre-TP1)
 //     * Runner stop after TP1: None / Breakeven / Chandelier (ATR trail)
 //     * Supertrend trail kicks in after TP2 (ratchets only in our favor)
 //     * Time stop: close if TP1 isn't reached within N bars
@@ -56,31 +57,32 @@ adxThresh = input.int(30, "Min ADX",    minval=5, maxval=60, step=1,            
      tooltip="Skip new entries when ADX is below this. ~20 is the classic chop threshold; 30 was the optimization champion on NQ 3m over a 1-year window.")
 
 // -----------------------------------------------------------------------------
-// Inputs - Targets & Stops (tick-based, three legs)
+// Inputs - Targets & Stops (ATR-scaled, three legs)
 // -----------------------------------------------------------------------------
 grpRisk    = "Targets & Stops"
 useTp1     = input.bool(true, "Enable TP1",                                       group=grpRisk)
-tp1Ticks   = input.int(8,  "TP1 Distance (ticks)",  minval=1, maxval=200, step=1, group=grpRisk)
-tp1Pct     = input.int(33, "TP1 % of Position",     minval=1, maxval=98,  step=1, group=grpRisk)
+tp1Mult    = input.float(0.8, "TP1 Distance (x ATR)", minval=0.1, maxval=10.0, step=0.1, group=grpRisk,
+     tooltip="Take-profit distance as a multiple of ATR(atrLen). Volatility-adaptive: scales naturally across symbols and timeframes.")
+tp1Pct     = input.int(33, "TP1 % of Position",      minval=1,   maxval=98,  step=1, group=grpRisk)
 
 useTp2     = input.bool(true, "Enable TP2",                                       group=grpRisk)
-tp2Ticks   = input.int(16, "TP2 Distance (ticks)",  minval=1, maxval=400, step=1, group=grpRisk)
-tp2Pct     = input.int(33, "TP2 % of Position",     minval=1, maxval=98,  step=1, group=grpRisk)
+tp2Mult    = input.float(1.6, "TP2 Distance (x ATR)", minval=0.1, maxval=15.0, step=0.1, group=grpRisk)
+tp2Pct     = input.int(33, "TP2 % of Position",      minval=1,   maxval=98,  step=1, group=grpRisk)
 
 useTp3     = input.bool(true, "Enable TP3",                                       group=grpRisk)
-tp3Ticks   = input.int(32, "TP3 Distance (ticks)",  minval=1, maxval=600, step=1, group=grpRisk)
-tp3Pct     = input.int(34, "TP3 % of Position",     minval=1, maxval=98,  step=1, group=grpRisk,
+tp3Mult    = input.float(3.2, "TP3 Distance (x ATR)", minval=0.1, maxval=20.0, step=0.1, group=grpRisk)
+tp3Pct     = input.int(34, "TP3 % of Position",      minval=1,   maxval=98,  step=1, group=grpRisk,
      tooltip="The three TP percentages should sum to 100. The runner is the TP3 slice.")
 
 useHardSL = input.bool(true, "Hard Initial SL",                                   group=grpRisk)
-slTicks   = input.int(40, "Hard SL Distance (ticks)", minval=1, maxval=1000, step=1, group=grpRisk,
-     tooltip="Initial protective stop in ticks from entry. Stays active until a tighter post-TP1 / post-TP2 stop ratchets above it. 40t was the 1-year champion on NQ 3m - wider SL gave runners more room to develop before being tagged by intra-trade noise.")
+slMult    = input.float(4.0, "Hard SL Distance (x ATR)", minval=0.1, maxval=20.0, step=0.1, group=grpRisk,
+     tooltip="Initial protective stop in ATR multiples. Stays active until a tighter post-TP1 / post-TP2 stop ratchets above it. ~4 ATR was the 1-year champion on NQ 3m (40 ticks at ATR ~= 10 ticks).")
 
 tp1StopMode = input.string("Breakeven", "Runner Stop after TP1",
      options=["None", "Breakeven", "Chandelier"],                                 group=grpRisk,
-     tooltip="What stop to apply to the runner once TP1 fills:\nNone = no extra stop, hard SL still applies if enabled.\nBreakeven = entry +/- buffer ticks.\nChandelier = highest-high / lowest-low offset by N x ATR; volatility-adaptive trail.")
-beTicks    = input.int(1,  "Breakeven Buffer (ticks)", minval=0, maxval=50, step=1, group=grpRisk,
-     tooltip="Used when Runner Stop = Breakeven. Offset from entry. 0 = exact entry. Positive locks in N ticks of profit.")
+     tooltip="What stop to apply to the runner once TP1 fills:\nNone = no extra stop, hard SL still applies if enabled.\nBreakeven = entry +/- buffer (ATR multiple).\nChandelier = highest-high / lowest-low offset by N x ATR; volatility-adaptive trail.")
+beMult     = input.float(0.1, "Breakeven Buffer (x ATR)", minval=0.0, maxval=5.0, step=0.05, group=grpRisk,
+     tooltip="Used when Runner Stop = Breakeven. Offset from entry as ATR multiple. 0 = exact entry. Positive locks in profit; covers commissions/slippage.")
 chandLen   = input.int(7, "Chandelier ATR Length",     minval=2, maxval=50, step=1, group=grpRisk,
      tooltip="Used when Runner Stop = Chandelier. Default tightened to 7 for sub-5m scalping (14 was too loose on 3m NQ).")
 chandMult  = input.float(1.5, "Chandelier ATR Multiplier", minval=0.5, maxval=8.0, step=0.1, group=grpRisk,
@@ -173,12 +175,14 @@ exitedRth = useSession and inRth[1] and not inRth   // first bar after the sessi
 // =============================================================================
 // Entries + tick-based 3-TP trade management
 // =============================================================================
-tickSize  = syminfo.mintick
-tp1Dist   = tp1Ticks * tickSize
-tp2Dist   = tp2Ticks * tickSize
-tp3Dist   = tp3Ticks * tickSize
-slDist    = slTicks  * tickSize
-beDist    = beTicks  * tickSize
+// All risk distances are ATR multiples of the same supertrend ATR, so they
+// scale automatically with instrument volatility and timeframe.
+atrRisk   = ta.atr(atrLen)
+tp1Dist   = tp1Mult * atrRisk
+tp2Dist   = tp2Mult * atrRisk
+tp3Dist   = tp3Mult * atrRisk
+slDist    = slMult  * atrRisk
+beDist    = beMult  * atrRisk
 chandATR  = ta.atr(chandLen)
 chandDist = chandMult * chandATR
 

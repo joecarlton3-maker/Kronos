@@ -1,0 +1,273 @@
+//@version=5
+// =============================================================================
+// MA Crossover Strategy with ATR Stops and Dual ATR Profit Targets
+// -----------------------------------------------------------------------------
+// MA types supported: EMA, SMA, WMA, HMA, VWMA, FAMA, MAMA, KAMA, SMMA, TEMA
+// Risk management:    ATR-based stop loss, two ATR-based profit targets,
+//                     optional move-stop-to-breakeven after TP1, optional
+//                     ATR trailing stop.
+// =============================================================================
+strategy("MA Crossover + ATR Stops/Targets", overlay=true,
+     default_qty_type   = strategy.percent_of_equity,
+     default_qty_value  = 10,
+     pyramiding         = 0,
+     calc_on_every_tick = false,
+     process_orders_on_close = true,
+     commission_type    = strategy.commission.percent,
+     commission_value   = 0.04)
+
+// === INPUTS ==================================================================
+grpMA    = "Moving Averages"
+fastType = input.string("EMA",  "Fast MA Type", options=["EMA","SMA","WMA","HMA","VWMA","FAMA","MAMA","KAMA","SMMA","TEMA"], group=grpMA)
+slowType = input.string("SMA",  "Slow MA Type", options=["EMA","SMA","WMA","HMA","VWMA","FAMA","MAMA","KAMA","SMMA","TEMA"], group=grpMA)
+fastLen  = input.int(9,  "Fast MA Length", minval=1, group=grpMA)
+slowLen  = input.int(21, "Slow MA Length", minval=1, group=grpMA)
+src      = input.source(close, "Source", group=grpMA)
+
+grpMAMA   = "MAMA / FAMA"
+fastLimit = input.float(0.5,  "Fast Limit", step=0.01, minval=0.01, maxval=1.0, group=grpMAMA)
+slowLimit = input.float(0.05, "Slow Limit", step=0.01, minval=0.01, maxval=1.0, group=grpMAMA)
+
+grpKAMA  = "KAMA"
+kamaFast = input.int(2,  "Fast EMA Period", minval=1, group=grpKAMA)
+kamaSlow = input.int(30, "Slow EMA Period", minval=1, group=grpKAMA)
+
+grpRisk     = "Risk Management"
+atrLen      = input.int(14,    "ATR Length",            minval=1,  group=grpRisk)
+atrStopMult = input.float(2.0, "ATR Stop Multiplier",   step=0.1, minval=0.1, group=grpRisk)
+atrTp1Mult  = input.float(2.0, "ATR Target 1 Multiplier", step=0.1, minval=0.1, group=grpRisk)
+atrTp2Mult  = input.float(4.0, "ATR Target 2 Multiplier", step=0.1, minval=0.1, group=grpRisk)
+tp1Pct      = input.int(50,    "Target 1 Position %",   minval=1, maxval=99, group=grpRisk)
+moveBE      = input.bool(true, "Move Stop to Breakeven after TP1", group=grpRisk)
+useTrail    = input.bool(false,"Use ATR Trailing Stop", group=grpRisk)
+trailMult   = input.float(2.0, "ATR Trail Multiplier",  step=0.1, minval=0.1, group=grpRisk)
+
+grpStrat = "Strategy"
+tradeDir = input.string("Both", "Trade Direction", options=["Long","Short","Both"], group=grpStrat)
+fromDate = input.time(timestamp("2018-01-01 00:00 +0000"), "Start Date", group=grpStrat)
+toDate   = input.time(timestamp("2099-01-01 00:00 +0000"), "End Date",   group=grpStrat)
+inWindow = time >= fromDate and time <= toDate
+
+// === CUSTOM MA FUNCTIONS =====================================================
+
+// SMMA = Wilder's smoothing (RMA)
+f_smma(_src, _len) => ta.rma(_src, _len)
+
+// TEMA = 3*EMA - 3*EMA(EMA) + EMA(EMA(EMA))
+f_tema(_src, _len) =>
+    e1 = ta.ema(_src, _len)
+    e2 = ta.ema(e1,   _len)
+    e3 = ta.ema(e2,   _len)
+    3.0 * e1 - 3.0 * e2 + e3
+
+// KAMA = Kaufman's Adaptive Moving Average
+f_kama(_src, _len, _fast, _slow) =>
+    mom    = math.abs(_src - _src[_len])
+    vol    = math.sum(math.abs(_src - _src[1]), _len)
+    er     = vol != 0 ? mom / vol : 0.0
+    fastSC = 2.0 / (_fast + 1.0)
+    slowSC = 2.0 / (_slow + 1.0)
+    sc     = math.pow(er * (fastSC - slowSC) + slowSC, 2)
+    var float kama = na
+    kama := na(kama[1]) ? _src : kama[1] + sc * (_src - kama[1])
+    kama
+
+// MAMA / FAMA = MESA Adaptive Moving Average (John Ehlers)
+// Returns [mama, fama]
+f_mama(_src, _fastLimit, _slowLimit) =>
+    var float smooth       = 0.0
+    var float detrender    = 0.0
+    var float i1           = 0.0
+    var float q1           = 0.0
+    var float jI           = 0.0
+    var float jQ           = 0.0
+    var float i2           = 0.0
+    var float q2           = 0.0
+    var float re           = 0.0
+    var float im           = 0.0
+    var float period       = 0.0
+    var float smoothPeriod = 0.0
+    var float phase        = 0.0
+    var float mama         = 0.0
+    var float fama         = 0.0
+
+    smooth := (4.0 * _src + 3.0 * nz(_src[1]) + 2.0 * nz(_src[2]) + nz(_src[3])) / 10.0
+
+    detrender := (0.0962 * smooth + 0.5769 * nz(smooth[2]) - 0.5769 * nz(smooth[4]) - 0.0962 * nz(smooth[6])) * (0.075 * nz(period[1]) + 0.54)
+
+    q1 := (0.0962 * detrender + 0.5769 * nz(detrender[2]) - 0.5769 * nz(detrender[4]) - 0.0962 * nz(detrender[6])) * (0.075 * nz(period[1]) + 0.54)
+    i1 := nz(detrender[3])
+
+    jI := (0.0962 * i1 + 0.5769 * nz(i1[2]) - 0.5769 * nz(i1[4]) - 0.0962 * nz(i1[6])) * (0.075 * nz(period[1]) + 0.54)
+    jQ := (0.0962 * q1 + 0.5769 * nz(q1[2]) - 0.5769 * nz(q1[4]) - 0.0962 * nz(q1[6])) * (0.075 * nz(period[1]) + 0.54)
+
+    i2_raw = i1 - jQ
+    q2_raw = q1 + jI
+    i2 := 0.2 * i2_raw + 0.8 * nz(i2[1])
+    q2 := 0.2 * q2_raw + 0.8 * nz(q2[1])
+
+    re_raw = i2 * nz(i2[1]) + q2 * nz(q2[1])
+    im_raw = i2 * nz(q2[1]) - q2 * nz(i2[1])
+    re := 0.2 * re_raw + 0.8 * nz(re[1])
+    im := 0.2 * im_raw + 0.8 * nz(im[1])
+
+    float p = nz(period[1])
+    if im != 0.0 and re != 0.0
+        p := 360.0 / (math.atan(im / re) * 180.0 / math.pi)
+    if p > 1.5 * nz(period[1])
+        p := 1.5 * nz(period[1])
+    if p < 0.67 * nz(period[1])
+        p := 0.67 * nz(period[1])
+    p := math.max(6.0,  p)
+    p := math.min(50.0, p)
+    period       := 0.2  * p      + 0.8  * nz(period[1])
+    smoothPeriod := 0.33 * period + 0.67 * nz(smoothPeriod[1])
+
+    float ph = nz(phase[1])
+    if i1 != 0.0
+        ph := math.atan(q1 / i1) * 180.0 / math.pi
+    deltaPhase = nz(phase[1]) - ph
+    if deltaPhase < 1.0
+        deltaPhase := 1.0
+    alpha = _fastLimit / deltaPhase
+    if alpha < _slowLimit
+        alpha := _slowLimit
+    phase := ph
+
+    mama := alpha * _src        + (1.0 - alpha)       * nz(mama[1])
+    fama := 0.5 * alpha * mama  + (1.0 - 0.5 * alpha) * nz(fama[1])
+    [mama, fama]
+
+// Compute MAMA / FAMA once per bar so internal state updates correctly,
+// regardless of which MA type the user selects.
+[mamaVal, famaVal] = f_mama(src, fastLimit, slowLimit)
+
+// MA selector
+getMA(_src, _len, _type) =>
+    switch _type
+        "EMA"  => ta.ema(_src, _len)
+        "SMA"  => ta.sma(_src, _len)
+        "WMA"  => ta.wma(_src, _len)
+        "HMA"  => ta.hma(_src, _len)
+        "VWMA" => ta.vwma(_src, _len)
+        "SMMA" => f_smma(_src, _len)
+        "TEMA" => f_tema(_src, _len)
+        "KAMA" => f_kama(_src, _len, kamaFast, kamaSlow)
+        "MAMA" => mamaVal
+        "FAMA" => famaVal
+        =>        ta.ema(_src, _len)
+
+fastMA = getMA(src, fastLen, fastType)
+slowMA = getMA(src, slowLen, slowType)
+
+// === SIGNALS =================================================================
+longSig  = ta.crossover(fastMA, slowMA)
+shortSig = ta.crossunder(fastMA, slowMA)
+
+allowLong  = tradeDir == "Long"  or tradeDir == "Both"
+allowShort = tradeDir == "Short" or tradeDir == "Both"
+
+// === RISK MANAGEMENT =========================================================
+atr = ta.atr(atrLen)
+
+var float entryPrice = na
+var float entryATR   = na
+var float stopLvl    = na
+var float tp1Lvl     = na
+var float tp2Lvl     = na
+var bool  tp1Hit     = false
+
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+flat    = strategy.position_size == 0
+
+// Entries
+if inWindow and allowLong and longSig and not inLong
+    strategy.entry("Long", strategy.long)
+
+if inWindow and allowShort and shortSig and not inShort
+    strategy.entry("Short", strategy.short)
+
+// Capture entry parameters on the first bar a new position is open.
+newLong  = inLong  and nz(strategy.position_size[1]) <= 0
+newShort = inShort and nz(strategy.position_size[1]) >= 0
+if newLong or newShort
+    entryPrice := strategy.position_avg_price
+    entryATR   := nz(atr[1], atr)
+    tp1Hit     := false
+    if inLong
+        stopLvl := entryPrice - entryATR * atrStopMult
+        tp1Lvl  := entryPrice + entryATR * atrTp1Mult
+        tp2Lvl  := entryPrice + entryATR * atrTp2Mult
+    else
+        stopLvl := entryPrice + entryATR * atrStopMult
+        tp1Lvl  := entryPrice - entryATR * atrTp1Mult
+        tp2Lvl  := entryPrice - entryATR * atrTp2Mult
+
+// Detect TP1 fill (price has reached the first target while still in trade)
+if inLong and not tp1Hit and high >= tp1Lvl
+    tp1Hit := true
+if inShort and not tp1Hit and low <= tp1Lvl
+    tp1Hit := true
+
+// Optional: tighten stop to breakeven after TP1
+if tp1Hit and moveBE
+    if inLong  and stopLvl < entryPrice
+        stopLvl := entryPrice
+    if inShort and stopLvl > entryPrice
+        stopLvl := entryPrice
+
+// Optional: ATR trailing stop (only ratchets in favor of trade)
+if useTrail
+    if inLong
+        trailLong = close - atr * trailMult
+        if trailLong > stopLvl
+            stopLvl := trailLong
+    if inShort
+        trailShort = close + atr * trailMult
+        if trailShort < stopLvl
+            stopLvl := trailShort
+
+// Reset state when flat
+if flat
+    entryPrice := na
+    entryATR   := na
+    stopLvl    := na
+    tp1Lvl     := na
+    tp2Lvl     := na
+    tp1Hit     := false
+
+// Exits — submit each bar so updated stop / breakeven / trail are honored.
+if inLong
+    strategy.exit("TP1", from_entry="Long", qty_percent=tp1Pct, stop=stopLvl, limit=tp1Lvl)
+    strategy.exit("TP2", from_entry="Long",                     stop=stopLvl, limit=tp2Lvl)
+
+if inShort
+    strategy.exit("TP1", from_entry="Short", qty_percent=tp1Pct, stop=stopLvl, limit=tp1Lvl)
+    strategy.exit("TP2", from_entry="Short",                     stop=stopLvl, limit=tp2Lvl)
+
+// Optional: close on opposite signal
+closeOnOpposite = input.bool(false, "Close on Opposite Crossover", group=grpStrat)
+if closeOnOpposite
+    if inLong  and shortSig
+        strategy.close("Long",  comment="Opp")
+    if inShort and longSig
+        strategy.close("Short", comment="Opp")
+
+// === PLOTS ===================================================================
+plot(fastMA, "Fast MA", color=color.new(color.aqua, 0),   linewidth=2)
+plot(slowMA, "Slow MA", color=color.new(color.orange, 0), linewidth=2)
+
+plot(inLong or inShort ? stopLvl : na, "Stop",     color=color.new(color.red,    0), style=plot.style_linebr, linewidth=2)
+plot(inLong or inShort ? tp1Lvl  : na, "Target 1", color=color.new(color.lime,   0), style=plot.style_linebr, linewidth=1)
+plot(inLong or inShort ? tp2Lvl  : na, "Target 2", color=color.new(color.green,  0), style=plot.style_linebr, linewidth=2)
+
+bgcolor(longSig  ? color.new(color.green, 85) : na)
+bgcolor(shortSig ? color.new(color.red,   85) : na)
+
+plotshape(longSig,  title="Long Signal",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0), size=size.tiny)
+plotshape(shortSig, title="Short Signal", style=shape.triangledown, location=location.abovebar, color=color.new(color.red,   0), size=size.tiny)
+
+// === ALERTS ==================================================================
+alertcondition(longSig,  title="Long Crossover",  message="Fast MA crossed above Slow MA")
+alertcondition(shortSig, title="Short Crossover", message="Fast MA crossed below Slow MA")

@@ -46,7 +46,19 @@ grpStrat = "Strategy"
 tradeDir = input.string("Both", "Trade Direction", options=["Long","Short","Both"], group=grpStrat)
 fromDate = input.time(timestamp("2018-01-01 00:00 +0000"), "Start Date", group=grpStrat)
 toDate   = input.time(timestamp("2099-01-01 00:00 +0000"), "End Date",   group=grpStrat)
-inWindow = time >= fromDate and time <= toDate
+
+grpSess     = "Session Filter"
+useSession  = input.bool(false,            "Restrict to Session",   group=grpSess)
+sessionStr  = input.session("0930-1600",   "Trading Session",       group=grpSess)
+sessionDays = input.string("1234567",      "Allowed Days (1=Sun..7=Sat)", group=grpSess, tooltip="Concatenate digits for the days you want to trade. Example: 23456 = Mon-Fri.")
+sessionTZ   = input.string("exchange",     "Session Timezone",      options=["exchange","syminfo.timezone","UTC","America/New_York","Europe/London","Asia/Tokyo","Asia/Shanghai","Asia/Hong_Kong","Australia/Sydney"], group=grpSess)
+flatOutside = input.bool(true,             "Close Open Trades Outside Session", group=grpSess)
+
+tz             = sessionTZ == "exchange" or sessionTZ == "syminfo.timezone" ? syminfo.timezone : sessionTZ
+sessionSpec    = sessionStr + ":" + sessionDays
+inSessionTime  = not na(time(timeframe.period, sessionSpec, tz))
+inSession      = not useSession or inSessionTime
+inWindow       = time >= fromDate and time <= toDate and inSession
 
 // === CUSTOM MA FUNCTIONS =====================================================
 
@@ -253,6 +265,13 @@ if closeOnOpposite
         strategy.close("Long",  comment="Opp")
     if inShort and longSig
         strategy.close("Short", comment="Opp")
+
+// Flatten when leaving the trading session
+if useSession and flatOutside and not inSessionTime and (inLong or inShort)
+    strategy.close_all(comment="Session End")
+
+// Shade out-of-session bars on the chart
+bgcolor(useSession and not inSessionTime ? color.new(color.gray, 90) : na, title="Out of Session")
 
 // === PLOTS ===================================================================
 plot(fastMA, "Fast MA", color=color.new(color.aqua, 0),   linewidth=2)

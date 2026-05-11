@@ -37,6 +37,15 @@ tp1Ticks = input.int(100, "Take Profit 1 (ticks)", minval=1, group=grpRisk)
 tp2Ticks = input.int(200, "Take Profit 2 (ticks)", minval=1, group=grpRisk)
 tp1Pct   = input.int(50,  "Target 1 Position %",   minval=1, maxval=99, group=grpRisk)
 
+grpSess     = "Session Filter (RTH ET)"
+useSession  = input.bool(true,            "Restrict to Session",  group=grpSess)
+sessionStr  = input.session("0930-1600",  "Session (HHmm-HHmm)",  group=grpSess)
+sessionDays = input.string("23456",       "Allowed Days (1=Sun..7=Sat)", group=grpSess, tooltip="Default 23456 = Mon-Fri.")
+flatOutside = input.bool(true,            "Close Open Trades Outside Session", group=grpSess)
+
+inSessionTime = not na(time(timeframe.period, sessionStr + ":" + sessionDays, "America/New_York"))
+inSession     = not useSession or inSessionTime
+
 // === CUSTOM MA FUNCTIONS =====================================================
 
 // SMMA = Wilder's smoothing (RMA)
@@ -165,10 +174,10 @@ inShort = strategy.position_size < 0
 flat    = strategy.position_size == 0
 
 // Entries
-if longSig and not inLong
+if inSession and longSig and not inLong
     strategy.entry("Long", strategy.long)
 
-if shortSig and not inShort
+if inSession and shortSig and not inShort
     strategy.entry("Short", strategy.short)
 
 // Capture stop and target levels on the first bar of a new position.
@@ -199,6 +208,10 @@ if inShort
     strategy.exit("TP1", from_entry="Short", qty_percent=tp1Pct, stop=stopLvl, limit=tp1Lvl)
     strategy.exit("TP2", from_entry="Short",                     stop=stopLvl, limit=tp2Lvl)
 
+// Flatten any open position when leaving the session
+if useSession and flatOutside and not inSessionTime and (inLong or inShort)
+    strategy.close_all(comment="Session End")
+
 // === PLOTS ===================================================================
 plot(fastMA, "Fast MA", color=color.new(color.aqua, 0),   linewidth=2)
 plot(slowMA, "Slow MA", color=color.new(color.orange, 0), linewidth=2)
@@ -209,6 +222,7 @@ plot(inLong or inShort ? tp2Lvl  : na, "Target 2", color=color.new(color.green, 
 
 bgcolor(longSig  ? color.new(color.green, 85) : na)
 bgcolor(shortSig ? color.new(color.red,   85) : na)
+bgcolor(useSession and not inSessionTime ? color.new(color.gray, 92) : na, title="Out of Session")
 
 plotshape(longSig,  title="Long Signal",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0), size=size.tiny)
 plotshape(shortSig, title="Short Signal", style=shape.triangledown, location=location.abovebar, color=color.new(color.red,   0), size=size.tiny)

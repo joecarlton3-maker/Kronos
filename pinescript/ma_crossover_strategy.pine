@@ -54,6 +54,22 @@ sessionDays = input.string("1234567",      "Allowed Days (1=Sun..7=Sat)", group=
 sessionTZ   = input.string("exchange",     "Session Timezone",      options=["exchange","syminfo.timezone","UTC","America/New_York","Europe/London","Asia/Tokyo","Asia/Shanghai","Asia/Hong_Kong","Australia/Sydney"], group=grpSess)
 flatOutside = input.bool(true,             "Close Open Trades Outside Session", group=grpSess)
 
+grpFilter      = "Signal Filters"
+useHTF         = input.bool(false,  "Higher-Timeframe Trend Filter",        group=grpFilter)
+htfTF          = input.timeframe("D", "HTF Timeframe",                      group=grpFilter)
+htfMaType      = input.string("EMA","HTF MA Type", options=["EMA","SMA","WMA","HMA","VWMA","SMMA","TEMA","KAMA"], group=grpFilter)
+htfMaLen       = input.int(200,     "HTF MA Length",         minval=1,      group=grpFilter)
+useSlopeSep    = input.bool(false,  "MA Slope / Separation Filter",         group=grpFilter)
+minSepAtr      = input.float(0.25,  "Min Fast-Slow Separation (× ATR)", step=0.05, minval=0.0, group=grpFilter)
+slopeLookback  = input.int(3,       "Slow MA Slope Lookback (bars)", minval=1, group=grpFilter)
+minSlopeAtr    = input.float(0.05,  "Min Slow MA Slope (× ATR / bar)", step=0.01, minval=0.0, group=grpFilter)
+
+grpFreq        = "Trade Frequency Limits"
+useMaxPerDay   = input.bool(false, "Limit Trades per Day",          group=grpFreq)
+maxPerDay      = input.int(3,       "Max Entries per Day",   minval=1, group=grpFreq)
+useCooldown    = input.bool(false, "Cooldown Bars Between Entries", group=grpFreq)
+cooldownBars   = input.int(10,      "Cooldown Bars",         minval=1, group=grpFreq)
+
 tz             = sessionTZ == "exchange" or sessionTZ == "syminfo.timezone" ? syminfo.timezone : sessionTZ
 sessionSpec    = sessionStr + ":" + sessionDays
 inSessionTime  = not na(time(timeframe.period, sessionSpec, tz))
@@ -173,14 +189,51 @@ fastMA = getMA(src, fastLen, fastType)
 slowMA = getMA(src, slowLen, slowType)
 
 // === SIGNALS =================================================================
-longSig  = ta.crossover(fastMA, slowMA)
-shortSig = ta.crossunder(fastMA, slowMA)
+rawLong  = ta.crossover(fastMA, slowMA)
+rawShort = ta.crossunder(fastMA, slowMA)
 
 allowLong  = tradeDir == "Long"  or tradeDir == "Both"
 allowShort = tradeDir == "Short" or tradeDir == "Both"
 
 // === RISK MANAGEMENT =========================================================
 atr = ta.atr(atrLen)
+
+// --- Higher-timeframe trend filter ------------------------------------------
+htfMA_local() =>
+    switch htfMaType
+        "EMA"  => ta.ema(src, htfMaLen)
+        "SMA"  => ta.sma(src, htfMaLen)
+        "WMA"  => ta.wma(src, htfMaLen)
+        "HMA"  => ta.hma(src, htfMaLen)
+        "VWMA" => ta.vwma(src, htfMaLen)
+        "SMMA" => f_smma(src, htfMaLen)
+        "TEMA" => f_tema(src, htfMaLen)
+        "KAMA" => f_kama(src, htfMaLen, kamaFast, kamaSlow)
+        =>        ta.ema(src, htfMaLen)
+htfMA      = request.security(syminfo.tickerid, htfTF, htfMA_local(), lookahead=barmerge.lookahead_off)
+htfClose   = request.security(syminfo.tickerid, htfTF, close,        lookahead=barmerge.lookahead_off)
+htfLongOK  = not useHTF or htfClose > htfMA
+htfShortOK = not useHTF or htfClose < htfMA
+
+// --- Slope / separation filter ----------------------------------------------
+sep        = math.abs(fastMA - slowMA)
+sepOK      = not useSlopeSep or (atr > 0 and sep >= minSepAtr * atr)
+slowSlope  = slowMA - slowMA[slopeLookback]
+slopeLongOK  = not useSlopeSep or (atr > 0 and  slowSlope >=  minSlopeAtr * atr * slopeLookback)
+slopeShortOK = not useSlopeSep or (atr > 0 and -slowSlope >=  minSlopeAtr * atr * slopeLookback)
+
+// --- Trade frequency limits -------------------------------------------------
+var int  tradesToday    = 0
+var int  lastEntryBar   = na
+newDay = ta.change(time("D")) != 0
+if newDay
+    tradesToday := 0
+dayOK      = not useMaxPerDay or tradesToday < maxPerDay
+cooldownOK = not useCooldown  or na(lastEntryBar) or (bar_index - lastEntryBar) >= cooldownBars
+
+// --- Final filtered signals -------------------------------------------------
+longSig  = rawLong  and htfLongOK  and sepOK and slopeLongOK  and dayOK and cooldownOK
+shortSig = rawShort and htfShortOK and sepOK and slopeShortOK and dayOK and cooldownOK
 
 var float entryPrice = na
 var float entryATR   = na
@@ -196,9 +249,13 @@ flat    = strategy.position_size == 0
 // Entries
 if inWindow and allowLong and longSig and not inLong
     strategy.entry("Long", strategy.long)
+    tradesToday  := tradesToday + 1
+    lastEntryBar := bar_index
 
 if inWindow and allowShort and shortSig and not inShort
     strategy.entry("Short", strategy.short)
+    tradesToday  := tradesToday + 1
+    lastEntryBar := bar_index
 
 // Capture entry parameters on the first bar a new position is open.
 newLong  = inLong  and nz(strategy.position_size[1]) <= 0
@@ -276,6 +333,7 @@ bgcolor(useSession and not inSessionTime ? color.new(color.gray, 90) : na, title
 // === PLOTS ===================================================================
 plot(fastMA, "Fast MA", color=color.new(color.aqua, 0),   linewidth=2)
 plot(slowMA, "Slow MA", color=color.new(color.orange, 0), linewidth=2)
+plot(useHTF ? htfMA : na, "HTF MA", color=color.new(color.purple, 0), linewidth=2)
 
 plot(inLong or inShort ? stopLvl : na, "Stop",     color=color.new(color.red,    0), style=plot.style_linebr, linewidth=2)
 plot(inLong or inShort ? tp1Lvl  : na, "Target 1", color=color.new(color.lime,   0), style=plot.style_linebr, linewidth=1)

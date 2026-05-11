@@ -1,13 +1,12 @@
 //@version=5
 // =============================================================================
-// MA Crossover Strategy with ATR Stops and Dual ATR Profit Targets
+// MA Crossover Strategy with Fixed Tick-Based Stops and Profit Targets
 // -----------------------------------------------------------------------------
 // MA types supported: EMA, SMA, WMA, HMA, VWMA, FAMA, MAMA, KAMA, SMMA, TEMA
-// Risk management:    ATR-based stop loss, two ATR-based profit targets,
-//                     optional move-stop-to-breakeven after TP1, optional
-//                     ATR trailing stop.
+// Risk management:    Fixed stop loss in ticks, two fixed profit targets in
+//                     ticks, with configurable TP1 partial-close percentage.
 // =============================================================================
-strategy("MA Crossover + ATR Stops/Targets", overlay=true,
+strategy("MA Crossover + Fixed Tick Stops/Targets", overlay=true,
      default_qty_type   = strategy.percent_of_equity,
      default_qty_value  = 10,
      pyramiding         = 0,
@@ -18,8 +17,8 @@ strategy("MA Crossover + ATR Stops/Targets", overlay=true,
 
 // === INPUTS ==================================================================
 grpMA    = "Moving Averages"
-fastType = input.string("EMA",  "Fast MA Type", options=["EMA","SMA","WMA","HMA","VWMA","FAMA","MAMA","KAMA","SMMA","TEMA"], group=grpMA)
-slowType = input.string("SMA",  "Slow MA Type", options=["EMA","SMA","WMA","HMA","VWMA","FAMA","MAMA","KAMA","SMMA","TEMA"], group=grpMA)
+fastType = input.string("EMA", "Fast MA Type", options=["EMA","SMA","WMA","HMA","VWMA","FAMA","MAMA","KAMA","SMMA","TEMA"], group=grpMA)
+slowType = input.string("SMA", "Slow MA Type", options=["EMA","SMA","WMA","HMA","VWMA","FAMA","MAMA","KAMA","SMMA","TEMA"], group=grpMA)
 fastLen  = input.int(9,  "Fast MA Length", minval=1, group=grpMA)
 slowLen  = input.int(21, "Slow MA Length", minval=1, group=grpMA)
 src      = input.source(close, "Source", group=grpMA)
@@ -32,49 +31,11 @@ grpKAMA  = "KAMA"
 kamaFast = input.int(2,  "Fast EMA Period", minval=1, group=grpKAMA)
 kamaSlow = input.int(30, "Slow EMA Period", minval=1, group=grpKAMA)
 
-grpRisk     = "Risk Management"
-atrLen      = input.int(14,    "ATR Length",            minval=1,  group=grpRisk)
-atrStopMult = input.float(2.0, "ATR Stop Multiplier",   step=0.1, minval=0.1, group=grpRisk)
-atrTp1Mult  = input.float(2.0, "ATR Target 1 Multiplier", step=0.1, minval=0.1, group=grpRisk)
-atrTp2Mult  = input.float(4.0, "ATR Target 2 Multiplier", step=0.1, minval=0.1, group=grpRisk)
-tp1Pct      = input.int(50,    "Target 1 Position %",   minval=1, maxval=99, group=grpRisk)
-moveBE      = input.bool(true, "Move Stop to Breakeven after TP1", group=grpRisk)
-useTrail    = input.bool(false,"Use ATR Trailing Stop", group=grpRisk)
-trailMult   = input.float(2.0, "ATR Trail Multiplier",  step=0.1, minval=0.1, group=grpRisk)
-
-grpStrat = "Strategy"
-tradeDir = input.string("Both", "Trade Direction", options=["Long","Short","Both"], group=grpStrat)
-fromDate = input.time(timestamp("2018-01-01 00:00 +0000"), "Start Date", group=grpStrat)
-toDate   = input.time(timestamp("2099-01-01 00:00 +0000"), "End Date",   group=grpStrat)
-
-grpSess     = "Session Filter"
-useSession  = input.bool(false,            "Restrict to Session",   group=grpSess)
-sessionStr  = input.session("0930-1600",   "Trading Session",       group=grpSess)
-sessionDays = input.string("1234567",      "Allowed Days (1=Sun..7=Sat)", group=grpSess, tooltip="Concatenate digits for the days you want to trade. Example: 23456 = Mon-Fri.")
-sessionTZ   = input.string("exchange",     "Session Timezone",      options=["exchange","syminfo.timezone","UTC","America/New_York","Europe/London","Asia/Tokyo","Asia/Shanghai","Asia/Hong_Kong","Australia/Sydney"], group=grpSess)
-flatOutside = input.bool(true,             "Close Open Trades Outside Session", group=grpSess)
-
-grpFilter      = "Signal Filters"
-useHTF         = input.bool(false,  "Higher-Timeframe Trend Filter",        group=grpFilter)
-htfTF          = input.timeframe("D", "HTF Timeframe",                      group=grpFilter)
-htfMaType      = input.string("EMA","HTF MA Type", options=["EMA","SMA","WMA","HMA","VWMA","SMMA","TEMA","KAMA"], group=grpFilter)
-htfMaLen       = input.int(200,     "HTF MA Length",         minval=1,      group=grpFilter)
-useSlopeSep    = input.bool(false,  "MA Slope / Separation Filter",         group=grpFilter)
-minSepAtr      = input.float(0.25,  "Min Fast-Slow Separation (× ATR)", step=0.05, minval=0.0, group=grpFilter)
-slopeLookback  = input.int(3,       "Slow MA Slope Lookback (bars)", minval=1, group=grpFilter)
-minSlopeAtr    = input.float(0.05,  "Min Slow MA Slope (× ATR / bar)", step=0.01, minval=0.0, group=grpFilter)
-
-grpFreq        = "Trade Frequency Limits"
-useMaxPerDay   = input.bool(false, "Limit Trades per Day",          group=grpFreq)
-maxPerDay      = input.int(3,       "Max Entries per Day",   minval=1, group=grpFreq)
-useCooldown    = input.bool(false, "Cooldown Bars Between Entries", group=grpFreq)
-cooldownBars   = input.int(10,      "Cooldown Bars",         minval=1, group=grpFreq)
-
-tz             = sessionTZ == "exchange" or sessionTZ == "syminfo.timezone" ? syminfo.timezone : sessionTZ
-sessionSpec    = sessionStr + ":" + sessionDays
-inSessionTime  = not na(time(timeframe.period, sessionSpec, tz))
-inSession      = not useSession or inSessionTime
-inWindow       = time >= fromDate and time <= toDate and inSession
+grpRisk  = "Risk Management"
+slTicks  = input.int(100, "Stop Loss (ticks)",     minval=1, group=grpRisk)
+tp1Ticks = input.int(100, "Take Profit 1 (ticks)", minval=1, group=grpRisk)
+tp2Ticks = input.int(200, "Take Profit 2 (ticks)", minval=1, group=grpRisk)
+tp1Pct   = input.int(50,  "Target 1 Position %",   minval=1, maxval=99, group=grpRisk)
 
 // === CUSTOM MA FUNCTIONS =====================================================
 
@@ -189,151 +150,58 @@ fastMA = getMA(src, fastLen, fastType)
 slowMA = getMA(src, slowLen, slowType)
 
 // === SIGNALS =================================================================
-rawLong  = ta.crossover(fastMA, slowMA)
-rawShort = ta.crossunder(fastMA, slowMA)
-
-allowLong  = tradeDir == "Long"  or tradeDir == "Both"
-allowShort = tradeDir == "Short" or tradeDir == "Both"
+longSig  = ta.crossover(fastMA,  slowMA)
+shortSig = ta.crossunder(fastMA, slowMA)
 
 // === RISK MANAGEMENT =========================================================
-atr = ta.atr(atrLen)
+tick = syminfo.mintick
 
-// --- Higher-timeframe trend filter ------------------------------------------
-htfMA_local() =>
-    switch htfMaType
-        "EMA"  => ta.ema(src, htfMaLen)
-        "SMA"  => ta.sma(src, htfMaLen)
-        "WMA"  => ta.wma(src, htfMaLen)
-        "HMA"  => ta.hma(src, htfMaLen)
-        "VWMA" => ta.vwma(src, htfMaLen)
-        "SMMA" => f_smma(src, htfMaLen)
-        "TEMA" => f_tema(src, htfMaLen)
-        "KAMA" => f_kama(src, htfMaLen, kamaFast, kamaSlow)
-        =>        ta.ema(src, htfMaLen)
-htfMA      = request.security(syminfo.tickerid, htfTF, htfMA_local(), lookahead=barmerge.lookahead_off)
-htfClose   = request.security(syminfo.tickerid, htfTF, close,        lookahead=barmerge.lookahead_off)
-htfLongOK  = not useHTF or htfClose > htfMA
-htfShortOK = not useHTF or htfClose < htfMA
-
-// --- Slope / separation filter ----------------------------------------------
-sep        = math.abs(fastMA - slowMA)
-sepOK      = not useSlopeSep or (atr > 0 and sep >= minSepAtr * atr)
-slowSlope  = slowMA - slowMA[slopeLookback]
-slopeLongOK  = not useSlopeSep or (atr > 0 and  slowSlope >=  minSlopeAtr * atr * slopeLookback)
-slopeShortOK = not useSlopeSep or (atr > 0 and -slowSlope >=  minSlopeAtr * atr * slopeLookback)
-
-// --- Trade frequency limits -------------------------------------------------
-var int  tradesToday    = 0
-var int  lastEntryBar   = na
-newDay = ta.change(time("D")) != 0
-if newDay
-    tradesToday := 0
-dayOK      = not useMaxPerDay or tradesToday < maxPerDay
-cooldownOK = not useCooldown  or na(lastEntryBar) or (bar_index - lastEntryBar) >= cooldownBars
-
-// --- Final filtered signals -------------------------------------------------
-longSig  = rawLong  and htfLongOK  and sepOK and slopeLongOK  and dayOK and cooldownOK
-shortSig = rawShort and htfShortOK and sepOK and slopeShortOK and dayOK and cooldownOK
-
-var float entryPrice = na
-var float entryATR   = na
-var float stopLvl    = na
-var float tp1Lvl     = na
-var float tp2Lvl     = na
-var bool  tp1Hit     = false
+var float stopLvl = na
+var float tp1Lvl  = na
+var float tp2Lvl  = na
 
 inLong  = strategy.position_size > 0
 inShort = strategy.position_size < 0
 flat    = strategy.position_size == 0
 
 // Entries
-if inWindow and allowLong and longSig and not inLong
+if longSig and not inLong
     strategy.entry("Long", strategy.long)
-    tradesToday  := tradesToday + 1
-    lastEntryBar := bar_index
 
-if inWindow and allowShort and shortSig and not inShort
+if shortSig and not inShort
     strategy.entry("Short", strategy.short)
-    tradesToday  := tradesToday + 1
-    lastEntryBar := bar_index
 
-// Capture entry parameters on the first bar a new position is open.
+// Capture stop and target levels on the first bar of a new position.
 newLong  = inLong  and nz(strategy.position_size[1]) <= 0
 newShort = inShort and nz(strategy.position_size[1]) >= 0
-if newLong or newShort
-    entryPrice := strategy.position_avg_price
-    entryATR   := nz(atr[1], atr)
-    tp1Hit     := false
-    if inLong
-        stopLvl := entryPrice - entryATR * atrStopMult
-        tp1Lvl  := entryPrice + entryATR * atrTp1Mult
-        tp2Lvl  := entryPrice + entryATR * atrTp2Mult
-    else
-        stopLvl := entryPrice + entryATR * atrStopMult
-        tp1Lvl  := entryPrice - entryATR * atrTp1Mult
-        tp2Lvl  := entryPrice - entryATR * atrTp2Mult
-
-// Detect TP1 fill (price has reached the first target while still in trade)
-if inLong and not tp1Hit and high >= tp1Lvl
-    tp1Hit := true
-if inShort and not tp1Hit and low <= tp1Lvl
-    tp1Hit := true
-
-// Optional: tighten stop to breakeven after TP1
-if tp1Hit and moveBE
-    if inLong  and stopLvl < entryPrice
-        stopLvl := entryPrice
-    if inShort and stopLvl > entryPrice
-        stopLvl := entryPrice
-
-// Optional: ATR trailing stop (only ratchets in favor of trade)
-if useTrail
-    if inLong
-        trailLong = close - atr * trailMult
-        if trailLong > stopLvl
-            stopLvl := trailLong
-    if inShort
-        trailShort = close + atr * trailMult
-        if trailShort < stopLvl
-            stopLvl := trailShort
+if newLong
+    entry   = strategy.position_avg_price
+    stopLvl := entry - slTicks  * tick
+    tp1Lvl  := entry + tp1Ticks * tick
+    tp2Lvl  := entry + tp2Ticks * tick
+if newShort
+    entry   = strategy.position_avg_price
+    stopLvl := entry + slTicks  * tick
+    tp1Lvl  := entry - tp1Ticks * tick
+    tp2Lvl  := entry - tp2Ticks * tick
 
 // Reset state when flat
 if flat
-    entryPrice := na
-    entryATR   := na
-    stopLvl    := na
-    tp1Lvl     := na
-    tp2Lvl     := na
-    tp1Hit     := false
+    stopLvl := na
+    tp1Lvl  := na
+    tp2Lvl  := na
 
-// Exits — submit each bar so updated stop / breakeven / trail are honored.
+// Exits
 if inLong
     strategy.exit("TP1", from_entry="Long", qty_percent=tp1Pct, stop=stopLvl, limit=tp1Lvl)
     strategy.exit("TP2", from_entry="Long",                     stop=stopLvl, limit=tp2Lvl)
-
 if inShort
     strategy.exit("TP1", from_entry="Short", qty_percent=tp1Pct, stop=stopLvl, limit=tp1Lvl)
     strategy.exit("TP2", from_entry="Short",                     stop=stopLvl, limit=tp2Lvl)
 
-// Optional: close on opposite signal
-closeOnOpposite = input.bool(false, "Close on Opposite Crossover", group=grpStrat)
-if closeOnOpposite
-    if inLong  and shortSig
-        strategy.close("Long",  comment="Opp")
-    if inShort and longSig
-        strategy.close("Short", comment="Opp")
-
-// Flatten when leaving the trading session
-if useSession and flatOutside and not inSessionTime and (inLong or inShort)
-    strategy.close_all(comment="Session End")
-
-// Shade out-of-session bars on the chart
-bgcolor(useSession and not inSessionTime ? color.new(color.gray, 90) : na, title="Out of Session")
-
 // === PLOTS ===================================================================
 plot(fastMA, "Fast MA", color=color.new(color.aqua, 0),   linewidth=2)
 plot(slowMA, "Slow MA", color=color.new(color.orange, 0), linewidth=2)
-plot(useHTF ? htfMA : na, "HTF MA", color=color.new(color.purple, 0), linewidth=2)
 
 plot(inLong or inShort ? stopLvl : na, "Stop",     color=color.new(color.red,    0), style=plot.style_linebr, linewidth=2)
 plot(inLong or inShort ? tp1Lvl  : na, "Target 1", color=color.new(color.lime,   0), style=plot.style_linebr, linewidth=1)

@@ -68,6 +68,8 @@ rth_sess   = input.session("0930-1600", "RTH Session (NY time)",                
 g_wko      = "Weekly Kickoff"
 wko_sess   = input.session("1800-0900:1", "Kickoff Window (NY time, day-of-week)", group = g_wko,
      tooltip = "Window over which Weekly Kickoff High/Low are built. Default '1800-0900:1' = Sunday 18:00 NY (CME globex weekly open) through Monday 09:00 NY (the standard update time). Day-of-week codes: 1=Sun, 2=Mon, ... 7=Sat. Examples: '1800-2359:1' for Sunday eve only, or '1800-1700:1' for full Sun→Mon globex session.")
+wko_src_tf = input.timeframe("60", "Sampling TF for Kickoff", options = ["1", "5", "15", "30", "60"], group = g_wko,
+     tooltip = "Lower timeframe used to scan the kickoff window. Use a smaller TF for precision; use a larger TF so TradingView loads enough history on charts that only go back a few days.")
 
 va_pct = va_pct_in / 100.0
 tz     = "America/New_York"
@@ -88,38 +90,32 @@ prev_w_low   = request.security(syminfo.tickerid, "W", low[1],   lookahead = bar
 // Topstep doesn't publish the exact definition of the Weekly Kickoff High/Low. The most
 // plausible interpretation, given CME futures session structure, is the range built during
 // the FIRST portion of the trading week — between Sunday 18:00 ET (globex weekly open) and
-// Monday 09:00 ET (the standard update time, 30 min before RTH). Once that window closes
-// the levels are frozen and carry through the remainder of the week.
+// Monday 09:00 ET (the standard update time, 30 min before RTH).
 //
-// `wko_sess` is user-configurable, so alternative definitions can be tested.
-var float wko_high_live = na
-var float wko_low_live  = na
-var float wko_high      = na   // locked
-var float wko_low       = na   // locked
+// We compute the H/L by scanning a configurable lower timeframe (`wko_src_tf`) over the
+// configured kickoff session window. Using request.security on a higher TF makes the
+// kickoff range available even when the chart's intraday history is shallow (e.g. a 5-min
+// chart only loaded back to mid-week — its 60-min security request will still load far
+// enough back to see last Sunday evening).
+f_wko() =>
+    var float wkh = na
+    var float wkl = na
+    in_wk  = not na(time(timeframe.period, wko_sess, tz))
+    new_wk = in_wk and not in_wk[1]
+    if new_wk
+        wkh := high
+        wkl := low
+    else if in_wk
+        wkh := math.max(nz(wkh, high), high)
+        wkl := math.min(nz(wkl, low),  low)
+    [wkh, wkl]
 
-in_wko  = not na(time(timeframe.period, wko_sess, tz))
-new_wko = in_wko and not in_wko[1]
-end_wko = not in_wko and in_wko[1]
-
-if new_wko
-    wko_high_live := high
-    wko_low_live  := low
-
-if in_wko
-    wko_high_live := math.max(nz(wko_high_live, high), high)
-    wko_low_live  := math.min(nz(wko_low_live,  low),  low)
-    // Make the in-progress range visible immediately (lines drawn at the update event below
-    // can pull either live or locked value — we treat live as the current snapshot).
-    wko_high := wko_high_live
-    wko_low  := wko_low_live
-
-if end_wko
-    wko_high := wko_high_live
-    wko_low  := wko_low_live
+[wko_high, wko_low] = request.security(syminfo.tickerid, wko_src_tf, f_wko(), lookahead = barmerge.lookahead_on)
 
 // ---------- Volume profile of the prior RTH session ----------
 // Strategy: accumulate per-bar (low, high, volume) tuples during the live RTH session.
-// At the next RTH open, snapshot them as "previous" and reset live arrays.
+// Snapshot at the END of each RTH session (16:00 NY) so that "yesterday's" data is ready
+// for the next morning's update event (09:00 NY), which fires *before* the next RTH open.
 var array<float> bar_l  = array.new<float>()
 var array<float> bar_h  = array.new<float>()
 var array<float> bar_v  = array.new<float>()
@@ -135,15 +131,10 @@ var bool  prev_ready        = false
 
 in_rth  = not na(time(timeframe.period, rth_sess, tz))
 new_rth = in_rth and not in_rth[1]
+end_rth = not in_rth and in_rth[1]
 
 if new_rth
-    if array.size(bar_l) > 0 and not na(live_min) and not na(live_max) and live_max > live_min
-        bar_l_prev := array.copy(bar_l)
-        bar_h_prev := array.copy(bar_h)
-        bar_v_prev := array.copy(bar_v)
-        prev_min   := live_min
-        prev_max   := live_max
-        prev_ready := true
+    // Start of today's RTH — wipe live buffer so we start clean.
     array.clear(bar_l)
     array.clear(bar_h)
     array.clear(bar_v)
@@ -156,6 +147,17 @@ if in_rth
     array.push(bar_v, volume)
     live_min := na(live_min) ? low  : math.min(live_min, low)
     live_max := na(live_max) ? high : math.max(live_max, high)
+
+if end_rth
+    // RTH just closed — promote the just-completed session to "previous" so the next
+    // 09:00 NY update event can build VAH / VAL / VPOC from it.
+    if array.size(bar_l) > 0 and not na(live_min) and not na(live_max) and live_max > live_min
+        bar_l_prev := array.copy(bar_l)
+        bar_h_prev := array.copy(bar_h)
+        bar_v_prev := array.copy(bar_v)
+        prev_min   := live_min
+        prev_max   := live_max
+        prev_ready := true
 
 // Build a fresh histogram + VAH/VAL/POC from the stored prior-session bars.
 calc_va() =>
@@ -406,24 +408,3 @@ if not na(ln_pwl)
     line.set_x2(ln_pwl, right_x)
     if not na(lb_pwl)
         label.set_x(lb_pwl, right_x)
-
-// ---------- Status table ----------
-var table info = table.new(position.top_right, 2, 11, border_width = 1)
-f_row(r, lab, v, col) =>
-    table.cell(info, 0, r, lab, text_color = col, text_size = size.small)
-    table.cell(info, 1, r, na(v) ? "-" : f_fmt(v), text_color = col, text_size = size.small)
-
-if barstate.islast
-    table.clear(info, 0, 0, 1, 10)
-    f_row(0,  "PWH",      v_pwh,   c_pwh)
-    f_row(1,  "PDH",      v_pdh,   c_pdh)
-    f_row(2,  "VAH",      v_vah,   c_vah)
-    f_row(3,  "VPOC",     v_vpoc,  c_vpoc)
-    f_row(4,  "SETTLE",   v_settl, c_settl)
-    f_row(5,  "VAL",      v_val,   c_val)
-    f_row(6,  "PDL",      v_pdl,   c_pdl)
-    f_row(7,  "WKO Low",  v_wkol,  c_wkol)
-    f_row(8,  "WKO High", v_wkoh,  c_wkoh)
-    f_row(9,  "PWL",      v_pwl,   c_pwl)
-    table.cell(info, 0, 10, "Next update", text_color = color.gray, text_size = size.tiny)
-    table.cell(info, 1, 10, str.format("{0,number,00}:{1,number,00} NY", update_h, update_m), text_color = color.gray, text_size = size.tiny)

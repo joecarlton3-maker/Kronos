@@ -115,12 +115,19 @@ f_wko() =>
 [wko_high, wko_low] = request.security(syminfo.tickerid, wko_src_tf, f_wko(), lookahead = barmerge.lookahead_on)
 
 // ---------- Volume profile of the prior session ----------
-// Strategy: on every chart bar that falls inside the configured profile session, ask
-// request.security_lower_tf for the 1-minute (configurable) bars contained within, and
-// push each one into a session-scoped buffer. At session close we snapshot that buffer
-// as "previous" so the next morning's 09:00 update event can build VAH / VAL / VPOC
-// from it. Sampling at 1-min instead of the chart TF gives ~390 samples per RTH session
-// vs ~7 on a 1H chart, which is what was driving the VPOC drift vs Topstep.
+// Reset/snapshot is anchored to the FUTURES trading-day rollover at 18:00 NY (CME's
+// daily settlement boundary), NOT to the user's session input. This matters because
+// wraparound session strings like "1800-1700" never produce an out-of-session bar
+// on a continuous futures chart, so the old in_rth-transition reset never fired and
+// the buffers grew unbounded.
+//
+// trading_day_id: a unique int per futures trading day. Computed by shifting time
+// forward by 6 hours and reading the resulting NY calendar day -- this moves the
+// day rollover from midnight NY to 18:00 NY.
+shifted_t      = time + 6 * 3600 * 1000
+trading_day_id = year(shifted_t, tz) * 10000 + month(shifted_t, tz) * 100 + dayofmonth(shifted_t, tz)
+new_trading_day = trading_day_id != trading_day_id[1]
+
 var array<float> bar_l  = array.new<float>()
 var array<float> bar_h  = array.new<float>()
 var array<float> bar_v  = array.new<float>()
@@ -134,14 +141,20 @@ var float prev_min          = na
 var float prev_max          = na
 var bool  prev_ready        = false
 
-in_rth  = not na(time(timeframe.period, rth_sess, tz))
-new_rth = in_rth and not in_rth[1]
-end_rth = not in_rth and in_rth[1]
+in_rth = not na(time(timeframe.period, rth_sess, tz))
 
 // Always pull the lower-TF data; returns empty arrays if chart TF <= prof_tf.
 [ltf_l, ltf_h, ltf_v] = request.security_lower_tf(syminfo.tickerid, prof_tf, [low, high, volume])
 
-if new_rth
+if new_trading_day
+    // Snapshot the trading day we just finished, then reset the live buffer.
+    if array.size(bar_l) > 0 and not na(live_min) and not na(live_max) and live_max > live_min
+        bar_l_prev := array.copy(bar_l)
+        bar_h_prev := array.copy(bar_h)
+        bar_v_prev := array.copy(bar_v)
+        prev_min   := live_min
+        prev_max   := live_max
+        prev_ready := true
     array.clear(bar_l)
     array.clear(bar_h)
     array.clear(bar_v)
@@ -167,15 +180,6 @@ if in_rth
         array.push(bar_v, volume)
         live_min := na(live_min) ? low  : math.min(live_min, low)
         live_max := na(live_max) ? high : math.max(live_max, high)
-
-if end_rth
-    if array.size(bar_l) > 0 and not na(live_min) and not na(live_max) and live_max > live_min
-        bar_l_prev := array.copy(bar_l)
-        bar_h_prev := array.copy(bar_h)
-        bar_v_prev := array.copy(bar_v)
-        prev_min   := live_min
-        prev_max   := live_max
-        prev_ready := true
 
 // Build a fresh histogram + VAH/VAL/POC from the stored prior-session bars.
 calc_va() =>

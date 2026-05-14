@@ -47,13 +47,15 @@ isNewDay      = dayofmonth(time, tz) != dayofmonth(time[1], tz)
 var float pendingLevel = na   // level being built from today's 4 PM bar
 var float activeLevel  = na   // level traded during the current day
 
+atrValue = ta.atr(atrLength)  // evaluated every bar for consistency
+
 if isNewDay
     activeLevel := pendingLevel
 if isFourPMClose
-    pendingLevel := low + atrMult * ta.atr(atrLength)
+    pendingLevel := low + atrMult * atrValue
 
 // --- CCI robustness filter --------------------------------------------------
-cciValue  = ta.cci(cciLength)
+cciValue  = ta.cci(hlc3, cciLength)
 cciPass   = ta.lowest(cciValue, cciLookback) < cciThreshold
 filterOk  = not useCciFilter or cciPass
 

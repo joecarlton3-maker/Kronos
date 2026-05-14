@@ -50,8 +50,14 @@ c_pwl      = input.color(color.white,   "Last Week's Low",             group = g
 g_style    = "Style"
 line_w     = input.int(2, "Line Width", minval = 1, maxval = 5, group = g_style)
 style_opt  = input.string("Solid", "Line Style", options = ["Solid", "Dashed", "Dotted"], group = g_style)
-show_lbls  = input.bool(true, "Show Right-Side Price Labels", group = g_style)
-lbl_format = input.string("Default", "Precision", options = ["Default", "Mintick"], group = g_style)
+show_lbls  = input.bool(true, "Show Right-Side Price Labels (on chart)", group = g_style)
+
+g_output   = "Output Values"
+lbl_format = input.string("Default", "Precision",
+     options = ["Default", "Mintick", "0", "1", "2", "3", "4"], group = g_output,
+     tooltip = "How prices are formatted in on-chart labels, the price scale, and the status line. Mintick uses the symbol's tick size.")
+labels_on_scale  = input.bool(true,  "Labels on price scale", group = g_output)
+values_in_status = input.bool(true,  "Values in status line", group = g_output)
 
 g_prof     = "Volume Profile (VAH / VAL / VPOC)"
 va_pct_in  = input.float(70.0, "Value Area %", minval = 50.0, maxval = 95.0, step = 1.0, group = g_prof)
@@ -59,9 +65,16 @@ prof_rows  = input.int(100, "Profile Rows",    minval = 20,   maxval = 300,     
 rth_sess   = input.session("0930-1600", "RTH Session (NY time)",                        group = g_prof,
      tooltip = "The session window used to build yesterday's volume profile.")
 
+g_wko      = "Weekly Kickoff"
+wko_sess   = input.session("1800-0900:1", "Kickoff Window (NY time, day-of-week)", group = g_wko,
+     tooltip = "Window over which Weekly Kickoff High/Low are built. Default '1800-0900:1' = Sunday 18:00 NY (CME globex weekly open) through Monday 09:00 NY (the standard update time). Day-of-week codes: 1=Sun, 2=Mon, ... 7=Sat. Examples: '1800-2359:1' for Sunday eve only, or '1800-1700:1' for full Sun→Mon globex session.")
+
 va_pct = va_pct_in / 100.0
 tz     = "America/New_York"
 l_style = style_opt == "Solid" ? line.style_solid : style_opt == "Dashed" ? line.style_dashed : line.style_dotted
+
+// `display.*` flags control where a plot() shows up. We combine the user toggles.
+disp_mode = (labels_on_scale ? display.price_scale : display.none) + (values_in_status ? display.status_line : display.none)
 
 // ---------- Daily / Weekly values ----------
 // `high[1]` on a "D" / "W" timeframe with lookahead returns the previous *completed* daily/weekly bar.
@@ -71,30 +84,38 @@ prev_d_close = request.security(syminfo.tickerid, "D", close[1], lookahead = bar
 prev_w_high  = request.security(syminfo.tickerid, "W", high[1],  lookahead = barmerge.lookahead_on)
 prev_w_low   = request.security(syminfo.tickerid, "W", low[1],   lookahead = barmerge.lookahead_on)
 
-// ---------- Weekly Kickoff (first session of the current week) ----------
-// On CME futures the trading week opens Sunday 18:00 ET; the first daily bar of the week is
-// labelled Monday in NY time. We accumulate that bar's H/L while it is in progress and freeze
-// it once the next NY day begins.
-var float wko_high = na
-var float wko_low  = na
-var bool  wko_done = false
-var int   wko_week = -1
+// ---------- Weekly Kickoff (the "kickoff window" at the start of the trading week) ----------
+// Topstep doesn't publish the exact definition of the Weekly Kickoff High/Low. The most
+// plausible interpretation, given CME futures session structure, is the range built during
+// the FIRST portion of the trading week — between Sunday 18:00 ET (globex weekly open) and
+// Monday 09:00 ET (the standard update time, 30 min before RTH). Once that window closes
+// the levels are frozen and carry through the remainder of the week.
+//
+// `wko_sess` is user-configurable, so alternative definitions can be tested.
+var float wko_high_live = na
+var float wko_low_live  = na
+var float wko_high      = na   // locked
+var float wko_low       = na   // locked
 
-ny_wk  = weekofyear(time, tz)
-ny_day = dayofmonth(time, tz)
-new_wk = ny_wk != ny_wk[1]
+in_wko  = not na(time(timeframe.period, wko_sess, tz))
+new_wko = in_wko and not in_wko[1]
+end_wko = not in_wko and in_wko[1]
 
-if new_wk
-    wko_week := ny_wk
-    wko_high := high
-    wko_low  := low
-    wko_done := false
+if new_wko
+    wko_high_live := high
+    wko_low_live  := low
 
-if not wko_done
-    wko_high := math.max(nz(wko_high, high), high)
-    wko_low  := math.min(nz(wko_low,  low),  low)
-    if not new_wk and ny_day != ny_day[1]
-        wko_done := true
+if in_wko
+    wko_high_live := math.max(nz(wko_high_live, high), high)
+    wko_low_live  := math.min(nz(wko_low_live,  low),  low)
+    // Make the in-progress range visible immediately (lines drawn at the update event below
+    // can pull either live or locked value — we treat live as the current snapshot).
+    wko_high := wko_high_live
+    wko_low  := wko_low_live
+
+if end_wko
+    wko_high := wko_high_live
+    wko_low  := wko_low_live
 
 // ---------- Volume profile of the prior RTH session ----------
 // Strategy: accumulate per-bar (low, high, volume) tuples during the live RTH session.
@@ -197,7 +218,8 @@ calc_va() =>
 // ---------- Daily update trigger (30 min before NY RTH open) ----------
 ny_h    = hour(time, tz)
 ny_m    = minute(time, tz)
-day_id  = year(time, tz) * 10000 + month(time, tz) * 100 + ny_day
+ny_d    = dayofmonth(time, tz)
+day_id  = year(time, tz) * 10000 + month(time, tz) * 100 + ny_d
 
 past_t  = (ny_h > update_h) or (ny_h == update_h and ny_m >= update_m)
 var int last_update_id = -1
@@ -230,6 +252,22 @@ if update_event
     v_wkoh  := wko_high
     v_pwl   := prev_w_low
 
+// ---------- Price-scale / status-line plots ----------
+// These plots intentionally do NOT draw on the chart pane (no display.pane) — the on-chart
+// horizontal lines are still drawn by line.new() below for full styling control. The plots
+// exist purely so the user can choose to surface each level's price on the right-hand
+// price scale and / or in the chart's status line.
+plot(show_pwh   and not na(v_pwh)   ? v_pwh   : na, "PWH",      color = c_pwh,   linewidth = 1, display = disp_mode, editable = false)
+plot(show_pdh   and not na(v_pdh)   ? v_pdh   : na, "PDH",      color = c_pdh,   linewidth = 1, display = disp_mode, editable = false)
+plot(show_vah   and not na(v_vah)   ? v_vah   : na, "VAH",      color = c_vah,   linewidth = 1, display = disp_mode, editable = false)
+plot(show_vpoc  and not na(v_vpoc)  ? v_vpoc  : na, "VPOC",     color = c_vpoc,  linewidth = 1, display = disp_mode, editable = false)
+plot(show_settl and not na(v_settl) ? v_settl : na, "SETTLE",   color = c_settl, linewidth = 1, display = disp_mode, editable = false)
+plot(show_val   and not na(v_val)   ? v_val   : na, "VAL",      color = c_val,   linewidth = 1, display = disp_mode, editable = false)
+plot(show_pdl   and not na(v_pdl)   ? v_pdl   : na, "PDL",      color = c_pdl,   linewidth = 1, display = disp_mode, editable = false)
+plot(show_wkol  and not na(v_wkol)  ? v_wkol  : na, "WKO Low",  color = c_wkol,  linewidth = 1, display = disp_mode, editable = false)
+plot(show_wkoh  and not na(v_wkoh)  ? v_wkoh  : na, "WKO High", color = c_wkoh,  linewidth = 1, display = disp_mode, editable = false)
+plot(show_pwl   and not na(v_pwl)   ? v_pwl   : na, "PWL",      color = c_pwl,   linewidth = 1, display = disp_mode, editable = false)
+
 // ---------- Rendering ----------
 // One persistent line per level; on each update event move it to span "this update -> next".
 var int prev_update_time = na
@@ -257,7 +295,14 @@ var label lb_wkoh  = na
 var label lb_pwl   = na
 
 f_fmt(p) =>
-    lbl_format == "Mintick" ? str.tostring(p, format.mintick) : str.tostring(p)
+    switch lbl_format
+        "Mintick" => str.tostring(p, format.mintick)
+        "0"       => str.tostring(p, "#")
+        "1"       => str.tostring(p, "#.0")
+        "2"       => str.tostring(p, "#.00")
+        "3"       => str.tostring(p, "#.000")
+        "4"       => str.tostring(p, "#.0000")
+        =>           str.tostring(p)
 
 f_draw(_show, _val, _col, _name, _ln, _lb) =>
     line  ln = _ln

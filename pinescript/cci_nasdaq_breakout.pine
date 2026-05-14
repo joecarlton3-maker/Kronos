@@ -1,0 +1,82 @@
+//@version=5
+// =============================================================================
+// CCI-Filtered NASDAQ Breakout Strategy
+// -----------------------------------------------------------------------------
+// Designed for e-mini NASDAQ (NQ) on the 60-minute timeframe.
+//
+// Foundational breakout (cross-validated, no filter):
+//   - Reference level = previous day's 16:00 (4 PM) CME Chicago close
+//                       + 0.8 * ATR(40)
+//   - Buy-stop entry at the breakout level.
+//   - Forced exit at 23:00 (11 PM) Chicago, end of day.
+//   - Full session midnight -> 11 PM, weekdays only.
+//
+// Robustness filter (winner of 16.5M tests across 1,000 strategy variations):
+//   - CCI(27): over the last 18 bars, the lowest CCI value must be below -100.
+//   - Rationale: only enter after a recent meaningful pullback, never chasing
+//     an extended move.
+// =============================================================================
+strategy("CCI NASDAQ Breakout Filter",
+     overlay              = true,
+     pyramiding           = 0,
+     default_qty_type     = strategy.fixed,
+     default_qty_value    = 1,
+     calc_on_order_fills  = false,
+     process_orders_on_close = true,
+     initial_capital      = 100000,
+     commission_type      = strategy.commission.cash_per_order,
+     commission_value     = 0)
+
+// --- Inputs -----------------------------------------------------------------
+atrLength    = input.int(40,   "ATR Length",            minval = 1, group = "Breakout")
+atrMult      = input.float(0.8,"ATR Multiplier",        minval = 0, step  = 0.1, group = "Breakout")
+
+useCciFilter = input.bool(true, "Enable CCI Filter",                group = "CCI Filter")
+cciLength    = input.int(27,   "CCI Length",            minval = 1, group = "CCI Filter")
+cciLookback  = input.int(18,   "CCI Lookback (bars)",   minval = 1, group = "CCI Filter")
+cciThreshold = input.float(-100,"CCI Threshold",        step  = 1,  group = "CCI Filter")
+
+tz = "America/Chicago"
+
+// --- Daily reference level --------------------------------------------------
+// Capture the 16:00 Chicago close; ATR(40) is sampled on that same bar so the
+// breakout level is fixed for the following session.
+isFourPMClose = hour(time_close, tz) == 16 and minute(time_close, tz) == 0
+isNewDay      = dayofmonth(time, tz) != dayofmonth(time[1], tz)
+
+var float pendingLevel = na   // level being built from today's 4 PM close
+var float activeLevel  = na   // level traded during the current day
+
+if isNewDay
+    activeLevel := pendingLevel
+if isFourPMClose
+    pendingLevel := close + atrMult * ta.atr(atrLength)
+
+// --- CCI robustness filter --------------------------------------------------
+cciValue  = ta.cci(cciLength)
+cciPass   = ta.lowest(cciValue, cciLookback) < cciThreshold
+filterOk  = not useCciFilter or cciPass
+
+// --- Session window ---------------------------------------------------------
+dow         = dayofweek(time, tz)
+isWeekday   = dow != dayofweek.saturday and dow != dayofweek.sunday
+h           = hour(time, tz)
+inWindow    = isWeekday and h >= 0 and h <= 22
+isExitTime  = hour(time_close, tz) == 23 and minute(time_close, tz) == 0
+
+// --- Orders -----------------------------------------------------------------
+if isExitTime
+    strategy.close("Long", comment = "EOD 11 PM")
+    strategy.cancel("Long")
+else if inWindow and not na(activeLevel) and strategy.position_size == 0
+    if filterOk
+        strategy.entry("Long", strategy.long, stop = activeLevel)
+    else
+        strategy.cancel("Long")
+else if not inWindow
+    strategy.cancel("Long")
+
+// --- Plots ------------------------------------------------------------------
+plot(inWindow ? activeLevel : na, "Breakout Level", color = color.orange,
+     style = plot.style_linebr, linewidth = 2)
+bgcolor(inWindow and filterOk ? color.new(color.green, 92) : na, title = "Filter Active")

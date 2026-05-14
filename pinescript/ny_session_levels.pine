@@ -1,0 +1,384 @@
+// NY Session Levels
+// Locks in key reference levels 30 minutes before the New York RTH open (09:00 NY by default).
+// Levels are sampled once per trading day at the configured update time and held until the
+// next update, mirroring the "Topstep Levels" panel shown on topstepx.
+//
+//   Last Week's High            (red)
+//   Yesterday's High            (orange)
+//   Yesterday's Value Area High (yellow)
+//   Yesterday's Volume POC      (green)
+//   Settlement                  (aqua)        - prior daily close
+//   Yesterday's Value Area Low  (blue)
+//   Yesterday's Low             (dark purple)
+//   Weekly Kickoff Low          (fuchsia)
+//   Weekly Kickoff High         (pink)
+//   Last Week's Low             (white)
+
+//@version=5
+indicator("NY Session Levels", "NYSL", overlay = true, max_lines_count = 50, max_labels_count = 50)
+
+// ---------- Inputs ----------
+g_time     = "Update Time"
+update_h   = input.int(9,  "Update Hour (NY time)",   minval = 0, maxval = 23, group = g_time,
+     tooltip = "Hour, in America/New_York time, at which levels are sampled and locked for the day. Default 09:00 = 30 min before RTH open.")
+update_m   = input.int(0,  "Update Minute (NY time)", minval = 0, maxval = 59, group = g_time)
+
+g_levels   = "Levels (Visibility)"
+show_pwh   = input.bool(true, "Last Week's High",              group = g_levels)
+show_pdh   = input.bool(true, "Yesterday's High",              group = g_levels)
+show_vah   = input.bool(true, "Yesterday's Value Area High",   group = g_levels)
+show_vpoc  = input.bool(true, "Yesterday's Volume POC",        group = g_levels)
+show_settl = input.bool(true, "Settlement (prior close)",      group = g_levels)
+show_val   = input.bool(true, "Yesterday's Value Area Low",    group = g_levels)
+show_pdl   = input.bool(true, "Yesterday's Low",               group = g_levels)
+show_wkol  = input.bool(true, "Weekly Kickoff Low",            group = g_levels)
+show_wkoh  = input.bool(true, "Weekly Kickoff High",           group = g_levels)
+show_pwl   = input.bool(true, "Last Week's Low",               group = g_levels)
+
+g_colors   = "Colors"
+c_pwh      = input.color(color.red,     "Last Week's High",            group = g_colors)
+c_pdh      = input.color(color.orange,  "Yesterday's High",            group = g_colors)
+c_vah      = input.color(color.yellow,  "Yesterday's Value Area High", group = g_colors)
+c_vpoc     = input.color(color.green,   "Yesterday's Volume POC",      group = g_colors)
+c_settl    = input.color(color.aqua,    "Settlement",                  group = g_colors)
+c_val      = input.color(color.blue,    "Yesterday's Value Area Low",  group = g_colors)
+c_pdl      = input.color(#4b0082,       "Yesterday's Low",             group = g_colors)
+c_wkol     = input.color(color.fuchsia, "Weekly Kickoff Low",          group = g_colors)
+c_wkoh     = input.color(#ffb6c1,       "Weekly Kickoff High",         group = g_colors)
+c_pwl      = input.color(color.white,   "Last Week's Low",             group = g_colors)
+
+g_style    = "Style"
+line_w     = input.int(2, "Line Width", minval = 1, maxval = 5, group = g_style)
+style_opt  = input.string("Solid", "Line Style", options = ["Solid", "Dashed", "Dotted"], group = g_style)
+show_lbls  = input.bool(true, "Show Right-Side Price Labels", group = g_style)
+lbl_format = input.string("Default", "Precision", options = ["Default", "Mintick"], group = g_style)
+
+g_prof     = "Volume Profile (VAH / VAL / VPOC)"
+va_pct_in  = input.float(70.0, "Value Area %", minval = 50.0, maxval = 95.0, step = 1.0, group = g_prof)
+prof_rows  = input.int(100, "Profile Rows",    minval = 20,   maxval = 300,             group = g_prof)
+rth_sess   = input.session("0930-1600", "RTH Session (NY time)",                        group = g_prof,
+     tooltip = "The session window used to build yesterday's volume profile.")
+
+va_pct = va_pct_in / 100.0
+tz     = "America/New_York"
+l_style = style_opt == "Solid" ? line.style_solid : style_opt == "Dashed" ? line.style_dashed : line.style_dotted
+
+// ---------- Daily / Weekly values ----------
+// `high[1]` on a "D" / "W" timeframe with lookahead returns the previous *completed* daily/weekly bar.
+prev_d_high  = request.security(syminfo.tickerid, "D", high[1],  lookahead = barmerge.lookahead_on)
+prev_d_low   = request.security(syminfo.tickerid, "D", low[1],   lookahead = barmerge.lookahead_on)
+prev_d_close = request.security(syminfo.tickerid, "D", close[1], lookahead = barmerge.lookahead_on)
+prev_w_high  = request.security(syminfo.tickerid, "W", high[1],  lookahead = barmerge.lookahead_on)
+prev_w_low   = request.security(syminfo.tickerid, "W", low[1],   lookahead = barmerge.lookahead_on)
+
+// ---------- Weekly Kickoff (first session of the current week) ----------
+// On CME futures the trading week opens Sunday 18:00 ET; the first daily bar of the week is
+// labelled Monday in NY time. We accumulate that bar's H/L while it is in progress and freeze
+// it once the next NY day begins.
+var float wko_high = na
+var float wko_low  = na
+var bool  wko_done = false
+var int   wko_week = -1
+
+ny_wk  = weekofyear(time, tz)
+ny_day = dayofmonth(time, tz)
+new_wk = ny_wk != ny_wk[1]
+
+if new_wk
+    wko_week := ny_wk
+    wko_high := high
+    wko_low  := low
+    wko_done := false
+
+if not wko_done
+    wko_high := math.max(nz(wko_high, high), high)
+    wko_low  := math.min(nz(wko_low,  low),  low)
+    if not new_wk and ny_day != ny_day[1]
+        wko_done := true
+
+// ---------- Volume profile of the prior RTH session ----------
+// Strategy: accumulate per-bar (low, high, volume) tuples during the live RTH session.
+// At the next RTH open, snapshot them as "previous" and reset live arrays.
+var array<float> bar_l  = array.new<float>()
+var array<float> bar_h  = array.new<float>()
+var array<float> bar_v  = array.new<float>()
+var float live_min      = na
+var float live_max      = na
+
+var array<float> bar_l_prev = array.new<float>()
+var array<float> bar_h_prev = array.new<float>()
+var array<float> bar_v_prev = array.new<float>()
+var float prev_min          = na
+var float prev_max          = na
+var bool  prev_ready        = false
+
+in_rth  = not na(time(timeframe.period, rth_sess, tz))
+new_rth = in_rth and not in_rth[1]
+
+if new_rth
+    if array.size(bar_l) > 0 and not na(live_min) and not na(live_max) and live_max > live_min
+        bar_l_prev := array.copy(bar_l)
+        bar_h_prev := array.copy(bar_h)
+        bar_v_prev := array.copy(bar_v)
+        prev_min   := live_min
+        prev_max   := live_max
+        prev_ready := true
+    array.clear(bar_l)
+    array.clear(bar_h)
+    array.clear(bar_v)
+    live_min := na
+    live_max := na
+
+if in_rth
+    array.push(bar_l, low)
+    array.push(bar_h, high)
+    array.push(bar_v, volume)
+    live_min := na(live_min) ? low  : math.min(live_min, low)
+    live_max := na(live_max) ? high : math.max(live_max, high)
+
+// Build a fresh histogram + VAH/VAL/POC from the stored prior-session bars.
+calc_va() =>
+    float vpoc = na
+    float vah  = na
+    float val  = na
+    n_bars     = array.size(bar_l_prev)
+    if prev_ready and n_bars > 0 and not na(prev_min) and not na(prev_max) and prev_max > prev_min
+        bin_h = (prev_max - prev_min) / prof_rows
+        vols  = array.new<float>(prof_rows, 0.0)
+        for j = 0 to n_bars - 1
+            bl = array.get(bar_l_prev, j)
+            bh = array.get(bar_h_prev, j)
+            bv = array.get(bar_v_prev, j)
+            blo = math.max(0,             int(math.floor((bl - prev_min) / bin_h)))
+            bhi = math.min(prof_rows - 1, int(math.floor((bh - prev_min) / bin_h)))
+            if bhi >= blo and bv > 0
+                per = bv / (bhi - blo + 1)
+                for i = blo to bhi
+                    array.set(vols, i, array.get(vols, i) + per)
+        // POC = bin with maximum volume
+        poc_idx = 0
+        max_v   = array.get(vols, 0)
+        total_v = 0.0
+        for i = 0 to prof_rows - 1
+            v = array.get(vols, i)
+            total_v += v
+            if v > max_v
+                max_v   := v
+                poc_idx := i
+        vpoc := prev_min + (poc_idx + 0.5) * bin_h
+        // Expand from POC until cumulative volume >= va_pct of total
+        target = total_v * va_pct
+        cum    = array.get(vols, poc_idx)
+        lo     = poc_idx
+        hi     = poc_idx
+        while cum < target and (lo > 0 or hi < prof_rows - 1)
+            up_ok = hi < prof_rows - 1
+            dn_ok = lo > 0
+            up_v  = up_ok ? array.get(vols, hi + 1) : -1.0
+            dn_v  = dn_ok ? array.get(vols, lo - 1) : -1.0
+            if not up_ok and not dn_ok
+                break
+            if not up_ok
+                cum += dn_v
+                lo  -= 1
+            else if not dn_ok
+                cum += up_v
+                hi  += 1
+            else if up_v >= dn_v
+                cum += up_v
+                hi  += 1
+            else
+                cum += dn_v
+                lo  -= 1
+        val := prev_min + lo * bin_h
+        vah := prev_min + (hi + 1) * bin_h
+    [vpoc, vah, val]
+
+// ---------- Daily update trigger (30 min before NY RTH open) ----------
+ny_h    = hour(time, tz)
+ny_m    = minute(time, tz)
+day_id  = year(time, tz) * 10000 + month(time, tz) * 100 + ny_day
+
+past_t  = (ny_h > update_h) or (ny_h == update_h and ny_m >= update_m)
+var int last_update_id = -1
+update_event = past_t and day_id != last_update_id
+if update_event
+    last_update_id := day_id
+
+// Cached level values, refreshed on each update event.
+var float v_pwh   = na
+var float v_pdh   = na
+var float v_vah   = na
+var float v_vpoc  = na
+var float v_settl = na
+var float v_val   = na
+var float v_pdl   = na
+var float v_wkol  = na
+var float v_wkoh  = na
+var float v_pwl   = na
+
+if update_event
+    [_vpoc, _vah, _val] = calc_va()
+    v_pwh   := prev_w_high
+    v_pdh   := prev_d_high
+    v_vah   := _vah
+    v_vpoc  := _vpoc
+    v_settl := prev_d_close
+    v_val   := _val
+    v_pdl   := prev_d_low
+    v_wkol  := wko_low
+    v_wkoh  := wko_high
+    v_pwl   := prev_w_low
+
+// ---------- Rendering ----------
+// One persistent line per level; on each update event move it to span "this update -> next".
+var int prev_update_time = na
+
+var line ln_pwh   = na
+var line ln_pdh   = na
+var line ln_vah   = na
+var line ln_vpoc  = na
+var line ln_settl = na
+var line ln_val   = na
+var line ln_pdl   = na
+var line ln_wkol  = na
+var line ln_wkoh  = na
+var line ln_pwl   = na
+
+var label lb_pwh   = na
+var label lb_pdh   = na
+var label lb_vah   = na
+var label lb_vpoc  = na
+var label lb_settl = na
+var label lb_val   = na
+var label lb_pdl   = na
+var label lb_wkol  = na
+var label lb_wkoh  = na
+var label lb_pwl   = na
+
+f_fmt(p) =>
+    lbl_format == "Mintick" ? str.tostring(p, format.mintick) : str.tostring(p)
+
+f_draw(_show, _val, _col, _name, _ln, _lb) =>
+    line  ln = _ln
+    label lb = _lb
+    if _show and not na(_val)
+        x1 = na(prev_update_time) ? time - 86400000 : prev_update_time
+        x2 = time + 86400000
+        if na(ln)
+            ln := line.new(x1, _val, x2, _val, xloc = xloc.bar_time, color = _col, width = line_w, style = l_style)
+        else
+            line.set_xy1(ln, x1, _val)
+            line.set_xy2(ln, x2, _val)
+            line.set_color(ln, _col)
+            line.set_width(ln, line_w)
+            line.set_style(ln, l_style)
+        if show_lbls
+            if na(lb)
+                lb := label.new(x2, _val, text = _name + "  " + f_fmt(_val), xloc = xloc.bar_time, color = _col, style = label.style_label_left, textcolor = color.black, size = size.small)
+            else
+                label.set_xy(lb, x2, _val)
+                label.set_text(lb, _name + "  " + f_fmt(_val))
+                label.set_color(lb, _col)
+        else if not na(lb)
+            label.delete(lb)
+            lb := na
+    [ln, lb]
+
+if update_event
+    [a1, b1] = f_draw(show_pwh,   v_pwh,   c_pwh,   "PWH",      ln_pwh,   lb_pwh)
+    ln_pwh   := a1
+    lb_pwh   := b1
+    [a2, b2] = f_draw(show_pdh,   v_pdh,   c_pdh,   "PDH",      ln_pdh,   lb_pdh)
+    ln_pdh   := a2
+    lb_pdh   := b2
+    [a3, b3] = f_draw(show_vah,   v_vah,   c_vah,   "VAH",      ln_vah,   lb_vah)
+    ln_vah   := a3
+    lb_vah   := b3
+    [a4, b4] = f_draw(show_vpoc,  v_vpoc,  c_vpoc,  "VPOC",     ln_vpoc,  lb_vpoc)
+    ln_vpoc  := a4
+    lb_vpoc  := b4
+    [a5, b5] = f_draw(show_settl, v_settl, c_settl, "SETTLE",   ln_settl, lb_settl)
+    ln_settl := a5
+    lb_settl := b5
+    [a6, b6] = f_draw(show_val,   v_val,   c_val,   "VAL",      ln_val,   lb_val)
+    ln_val   := a6
+    lb_val   := b6
+    [a7, b7] = f_draw(show_pdl,   v_pdl,   c_pdl,   "PDL",      ln_pdl,   lb_pdl)
+    ln_pdl   := a7
+    lb_pdl   := b7
+    [a8, b8] = f_draw(show_wkol,  v_wkol,  c_wkol,  "WKO Low",  ln_wkol,  lb_wkol)
+    ln_wkol  := a8
+    lb_wkol  := b8
+    [a9, b9] = f_draw(show_wkoh,  v_wkoh,  c_wkoh,  "WKO High", ln_wkoh,  lb_wkoh)
+    ln_wkoh  := a9
+    lb_wkoh  := b9
+    [a10, b10] = f_draw(show_pwl, v_pwl,   c_pwl,   "PWL",      ln_pwl,   lb_pwl)
+    ln_pwl   := a10
+    lb_pwl   := b10
+    prev_update_time := time
+
+// On every bar, drag the right edge of each existing line to the current bar so it
+// visually "extends right" until the next update overwrites it.
+right_x = time + 86400000
+if not na(ln_pwh)
+    line.set_x2(ln_pwh, right_x)
+    if not na(lb_pwh)
+        label.set_x(lb_pwh, right_x)
+if not na(ln_pdh)
+    line.set_x2(ln_pdh, right_x)
+    if not na(lb_pdh)
+        label.set_x(lb_pdh, right_x)
+if not na(ln_vah)
+    line.set_x2(ln_vah, right_x)
+    if not na(lb_vah)
+        label.set_x(lb_vah, right_x)
+if not na(ln_vpoc)
+    line.set_x2(ln_vpoc, right_x)
+    if not na(lb_vpoc)
+        label.set_x(lb_vpoc, right_x)
+if not na(ln_settl)
+    line.set_x2(ln_settl, right_x)
+    if not na(lb_settl)
+        label.set_x(lb_settl, right_x)
+if not na(ln_val)
+    line.set_x2(ln_val, right_x)
+    if not na(lb_val)
+        label.set_x(lb_val, right_x)
+if not na(ln_pdl)
+    line.set_x2(ln_pdl, right_x)
+    if not na(lb_pdl)
+        label.set_x(lb_pdl, right_x)
+if not na(ln_wkol)
+    line.set_x2(ln_wkol, right_x)
+    if not na(lb_wkol)
+        label.set_x(lb_wkol, right_x)
+if not na(ln_wkoh)
+    line.set_x2(ln_wkoh, right_x)
+    if not na(lb_wkoh)
+        label.set_x(lb_wkoh, right_x)
+if not na(ln_pwl)
+    line.set_x2(ln_pwl, right_x)
+    if not na(lb_pwl)
+        label.set_x(lb_pwl, right_x)
+
+// ---------- Status table ----------
+var table info = table.new(position.top_right, 2, 11, border_width = 1)
+f_row(r, lab, v, col) =>
+    table.cell(info, 0, r, lab, text_color = col, text_size = size.small)
+    table.cell(info, 1, r, na(v) ? "-" : f_fmt(v), text_color = col, text_size = size.small)
+
+if barstate.islast
+    table.clear(info, 0, 0, 1, 10)
+    f_row(0,  "PWH",      v_pwh,   c_pwh)
+    f_row(1,  "PDH",      v_pdh,   c_pdh)
+    f_row(2,  "VAH",      v_vah,   c_vah)
+    f_row(3,  "VPOC",     v_vpoc,  c_vpoc)
+    f_row(4,  "SETTLE",   v_settl, c_settl)
+    f_row(5,  "VAL",      v_val,   c_val)
+    f_row(6,  "PDL",      v_pdl,   c_pdl)
+    f_row(7,  "WKO Low",  v_wkol,  c_wkol)
+    f_row(8,  "WKO High", v_wkoh,  c_wkoh)
+    f_row(9,  "PWL",      v_pwl,   c_pwl)
+    table.cell(info, 0, 10, "Next update", text_color = color.gray, text_size = size.tiny)
+    table.cell(info, 1, 10, str.format("{0,number,00}:{1,number,00} NY", update_h, update_m), text_color = color.gray, text_size = size.tiny)

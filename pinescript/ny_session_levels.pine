@@ -61,15 +61,15 @@ values_in_status = input.bool(true,  "Values in status line", group = g_output)
 
 g_prof     = "Volume Profile (VAH / VAL / VPOC)"
 va_pct_in  = input.float(70.0, "Value Area %", minval = 50.0, maxval = 95.0, step = 1.0, group = g_prof)
-prof_rows  = input.int(100, "Profile Rows",    minval = 20,   maxval = 300,             group = g_prof)
-rth_sess   = input.session("0930-1600", "RTH Session (NY time)",                        group = g_prof,
-     tooltip = "The session window used to build yesterday's volume profile.")
+prof_rows  = input.int(200, "Profile Rows",    minval = 20,   maxval = 500,             group = g_prof)
+rth_sess   = input.session("1800-1700", "Profile Session (NY time)",                    group = g_prof,
+     tooltip = "Session window used to build yesterday's volume profile. Default '1800-1700' = full CME Globex day (Sun 18:00 NY through Fri 17:00 NY). Use '0930-1600' for RTH only.")
+prof_tf    = input.timeframe("1", "Profile Sampling TF", options = ["1", "5", "15"], group = g_prof,
+     tooltip = "Lower timeframe used to sample the volume profile. 1m gives ~390 samples per RTH session vs ~7 on a 1H chart, which materially changes VPOC/VAH/VAL. Requires the chart TF to be larger than this TF.")
 
 g_wko      = "Weekly Kickoff"
-wko_sess   = input.session("1800-0900:1", "Kickoff Window (NY time, day-of-week)", group = g_wko,
-     tooltip = "Window over which Weekly Kickoff High/Low are built. Default '1800-0900:1' = Sunday 18:00 NY (CME globex weekly open) through Monday 09:00 NY (the standard update time). Day-of-week codes: 1=Sun, 2=Mon, ... 7=Sat. Examples: '1800-2359:1' for Sunday eve only, or '1800-1700:1' for full Sun→Mon globex session.")
-wko_src_tf = input.timeframe("60", "Sampling TF for Kickoff", options = ["1", "5", "15", "30", "60"], group = g_wko,
-     tooltip = "Lower timeframe used to scan the kickoff window. Use a smaller TF for precision; use a larger TF so TradingView loads enough history on charts that only go back a few days.")
+wko_src_tf = input.timeframe("60", "WKO Sampling TF", options = ["1", "5", "15", "30", "60"], group = g_wko,
+     tooltip = "Lower timeframe used to scan the running week H/L. Larger TFs load more history on charts that only go back a few days.")
 
 va_pct = va_pct_in / 100.0
 tz     = "America/New_York"
@@ -86,36 +86,41 @@ prev_d_close = request.security(syminfo.tickerid, "D", close[1], lookahead = bar
 prev_w_high  = request.security(syminfo.tickerid, "W", high[1],  lookahead = barmerge.lookahead_on)
 prev_w_low   = request.security(syminfo.tickerid, "W", low[1],   lookahead = barmerge.lookahead_on)
 
-// ---------- Weekly Kickoff (the "kickoff window" at the start of the trading week) ----------
-// Topstep doesn't publish the exact definition of the Weekly Kickoff High/Low. The most
-// plausible interpretation, given CME futures session structure, is the range built during
-// the FIRST portion of the trading week — between Sunday 18:00 ET (globex weekly open) and
-// Monday 09:00 ET (the standard update time, 30 min before RTH).
+// ---------- Weekly Kickoff (running this-week H/L since Sun 18:00 NY) ----------
+// Observed Topstep behaviour: on a Wed-morning chart, WKO Low matched Monday's pre-RTH low
+// and WKO High matched a Tuesday peak — i.e. the range is the running High/Low of the
+// CURRENT futures week (since Sun 18:00 NY = CME Globex weekly open), expanding daily.
+// We reset at each Sun-18:00-NY transition and accumulate forward from there.
 //
-// We compute the H/L by scanning a configurable lower timeframe (`wko_src_tf`) over the
-// configured kickoff session window. Using request.security on a higher TF makes the
-// kickoff range available even when the chart's intraday history is shallow (e.g. a 5-min
-// chart only loaded back to mid-week — its 60-min security request will still load far
-// enough back to see last Sunday evening).
+// Wrapped in request.security on a higher TF so it works even when the chart's intraday
+// history doesn't reach back to last Sunday evening.
 f_wko() =>
     var float wkh = na
     var float wkl = na
-    in_wk  = not na(time(timeframe.period, wko_sess, tz))
-    new_wk = in_wk and not in_wk[1]
-    if new_wk
+    dow_now  = dayofweek(time, tz)
+    hr_now   = hour(time, tz)
+    dow_prev = dayofweek(time[1], tz)
+    hr_prev  = hour(time[1], tz)
+    in_new_week = dow_now == dayofweek.sunday and hr_now >= 18
+    in_new_week_prev = dow_prev == dayofweek.sunday and hr_prev >= 18
+    is_week_start = in_new_week and not in_new_week_prev
+    if is_week_start
         wkh := high
         wkl := low
-    else if in_wk
+    else
         wkh := math.max(nz(wkh, high), high)
         wkl := math.min(nz(wkl, low),  low)
     [wkh, wkl]
 
 [wko_high, wko_low] = request.security(syminfo.tickerid, wko_src_tf, f_wko(), lookahead = barmerge.lookahead_on)
 
-// ---------- Volume profile of the prior RTH session ----------
-// Strategy: accumulate per-bar (low, high, volume) tuples during the live RTH session.
-// Snapshot at the END of each RTH session (16:00 NY) so that "yesterday's" data is ready
-// for the next morning's update event (09:00 NY), which fires *before* the next RTH open.
+// ---------- Volume profile of the prior session ----------
+// Strategy: on every chart bar that falls inside the configured profile session, ask
+// request.security_lower_tf for the 1-minute (configurable) bars contained within, and
+// push each one into a session-scoped buffer. At session close we snapshot that buffer
+// as "previous" so the next morning's 09:00 update event can build VAH / VAL / VPOC
+// from it. Sampling at 1-min instead of the chart TF gives ~390 samples per RTH session
+// vs ~7 on a 1H chart, which is what was driving the VPOC drift vs Topstep.
 var array<float> bar_l  = array.new<float>()
 var array<float> bar_h  = array.new<float>()
 var array<float> bar_v  = array.new<float>()
@@ -133,8 +138,10 @@ in_rth  = not na(time(timeframe.period, rth_sess, tz))
 new_rth = in_rth and not in_rth[1]
 end_rth = not in_rth and in_rth[1]
 
+// Always pull the lower-TF data; returns empty arrays if chart TF <= prof_tf.
+[ltf_l, ltf_h, ltf_v] = request.security_lower_tf(syminfo.tickerid, prof_tf, [low, high, volume])
+
 if new_rth
-    // Start of today's RTH — wipe live buffer so we start clean.
     array.clear(bar_l)
     array.clear(bar_h)
     array.clear(bar_v)
@@ -142,15 +149,26 @@ if new_rth
     live_max := na
 
 if in_rth
-    array.push(bar_l, low)
-    array.push(bar_h, high)
-    array.push(bar_v, volume)
-    live_min := na(live_min) ? low  : math.min(live_min, low)
-    live_max := na(live_max) ? high : math.max(live_max, high)
+    ltf_n = array.size(ltf_l)
+    if ltf_n > 0
+        for j = 0 to ltf_n - 1
+            l_j = array.get(ltf_l, j)
+            h_j = array.get(ltf_h, j)
+            v_j = array.get(ltf_v, j)
+            array.push(bar_l, l_j)
+            array.push(bar_h, h_j)
+            array.push(bar_v, v_j)
+            live_min := na(live_min) ? l_j : math.min(live_min, l_j)
+            live_max := na(live_max) ? h_j : math.max(live_max, h_j)
+    else
+        // Fallback: chart TF is already <= prof_tf, just use chart bar itself.
+        array.push(bar_l, low)
+        array.push(bar_h, high)
+        array.push(bar_v, volume)
+        live_min := na(live_min) ? low  : math.min(live_min, low)
+        live_max := na(live_max) ? high : math.max(live_max, high)
 
 if end_rth
-    // RTH just closed — promote the just-completed session to "previous" so the next
-    // 09:00 NY update event can build VAH / VAL / VPOC from it.
     if array.size(bar_l) > 0 and not na(live_min) and not na(live_max) and live_max > live_min
         bar_l_prev := array.copy(bar_l)
         bar_h_prev := array.copy(bar_h)

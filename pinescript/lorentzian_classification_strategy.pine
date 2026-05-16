@@ -287,7 +287,7 @@ sizeLoop = math.min(settings.maxBarsBack-1, size)
 if bar_index >= maxBarsBackIndex
     for i = 0 to sizeLoop
         d = get_lorentzian_distance(i, settings.featureCount, featureSeries, featureArrays)
-        if d >= lastDistance and i%4
+        if d >= lastDistance and i%4 != 0
             lastDistance := d
             array.push(distances, d)
             array.push(predictions, math.round(array.get(y_train_array, i)))
@@ -307,13 +307,13 @@ signal := prediction > 0 and filter_all ? direction.long : prediction < 0 and fi
 
 // Bar-Count Filters
 var int barsHeld = 0
-barsHeld := ta.change(signal) ? 0 : barsHeld + 1
+barsHeld := ta.change(signal) != 0 ? 0 : barsHeld + 1
 isHeldFourBars = barsHeld == 4
 isHeldLessThanFourBars = 0 < barsHeld and barsHeld < 4
 
 // Fractal Filters
-isDifferentSignalType = ta.change(signal)
-isEarlySignalFlip = ta.change(signal) and (ta.change(signal[1]) or ta.change(signal[2]) or ta.change(signal[3]))
+isDifferentSignalType = ta.change(signal) != 0
+isEarlySignalFlip = ta.change(signal) != 0 and (ta.change(signal[1]) != 0 or ta.change(signal[2]) != 0 or ta.change(signal[3]) != 0)
 isBuySignal = signal == direction.long and isEmaUptrend and isSmaUptrend
 isSellSignal = signal == direction.short and isEmaDowntrend and isSmaDowntrend
 isLastSignalBuy = signal[4] == direction.long and isEmaUptrend[4] and isSmaUptrend[4]
@@ -431,17 +431,25 @@ plotshape(endShortTrade and settings.showExits ? low : na, 'StopSell', shape.xcr
 // ================
 // ==== Alerts ====
 // ================
+// Note: alertcondition() has no effect inside a strategy, so alert() is used instead.
+// In TradingView, create the alert with the condition set to "Any alert() function call".
 
-alertcondition(startLongTrade, title='Open Long ▲', message='LDC Open Long ▲ | {{ticker}}@{{close}} | ({{interval}})')
-alertcondition(endLongTrade, title='Close Long ▲', message='LDC Close Long ▲ | {{ticker}}@{{close}} | ({{interval}})')
-alertcondition(startShortTrade, title='Open Short ▼', message='LDC Open Short  | {{ticker}}@{{close}} | ({{interval}})')
-alertcondition(endShortTrade, title='Close Short ▼', message='LDC Close Short ▼ | {{ticker}}@{{close}} | ({{interval}})')
+tickerStr = syminfo.ticker
+intervalStr = timeframe.period
 
-alertcondition(startShortTrade or startLongTrade, title='Open Position ▲▼', message='LDC Open Position ▲▼ | {{ticker}}@{{close}} | ({{interval}})')
-alertcondition(endShortTrade or endLongTrade, title='Close Position ▲▼', message='LDC Close Position  ▲▼ | {{ticker}}@[{{close}}] | ({{interval}})')
+if startLongTrade
+    alert('LDC Open Long ▲ | ' + tickerStr + '@' + str.tostring(close) + ' | (' + intervalStr + ')', alert.freq_once_per_bar_close)
+if endLongTrade
+    alert('LDC Close Long ▲ | ' + tickerStr + '@' + str.tostring(close) + ' | (' + intervalStr + ')', alert.freq_once_per_bar_close)
+if startShortTrade
+    alert('LDC Open Short ▼ | ' + tickerStr + '@' + str.tostring(close) + ' | (' + intervalStr + ')', alert.freq_once_per_bar_close)
+if endShortTrade
+    alert('LDC Close Short ▼ | ' + tickerStr + '@' + str.tostring(close) + ' | (' + intervalStr + ')', alert.freq_once_per_bar_close)
 
-alertcondition(condition=alertBullish, title='Kernel Bullish Color Change', message='LDC Kernel Bullish ▲ | {{ticker}}@{{close}} | ({{interval}})')
-alertcondition(condition=alertBearish, title='Kernel Bearish Color Change', message='LDC Kernel Bearish ▼ | {{ticker}}@{{close}} | ({{interval}})')
+if alertBullish
+    alert('LDC Kernel Bullish ▲ | ' + tickerStr + '@' + str.tostring(close) + ' | (' + intervalStr + ')', alert.freq_once_per_bar_close)
+if alertBearish
+    alert('LDC Kernel Bearish ▼ | ' + tickerStr + '@' + str.tostring(close) + ' | (' + intervalStr + ')', alert.freq_once_per_bar_close)
 
 // =========================
 // ==== Display Signals ====

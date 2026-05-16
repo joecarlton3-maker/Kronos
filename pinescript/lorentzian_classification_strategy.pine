@@ -260,6 +260,18 @@ startDate = input.time(timestamp("2020-01-01 00:00"), "Start Date", group="Strat
 endDate = input.time(timestamp("2099-12-31 00:00"), "End Date", group="Strategy Settings", inline="date")
 inDateRange = useDateFilter ? (time >= startDate and time <= endDate) : true
 
+// Session Filter (RTH)
+useSessionFilter = input.bool(false, "Use Session Filter", group="Session Filter", tooltip="Only allow entries during the specified trading session. Defaults to US equities Regular Trading Hours (RTH).")
+sessionString = input.session("0930-1600", "Session", group="Session Filter", tooltip="Session time in the exchange's timezone. Default 0930-1600 covers US equities RTH. To avoid closing-auction noise, shorten the range (e.g. 0930-1545).")
+sessionDays = input.string("23456", "Session Days", options=["1234567", "23456", "234567", "12345"], group="Session Filter", tooltip="Day mask: 1=Sun, 2=Mon, ..., 7=Sat. 23456=Mon-Fri (default), 1234567=all days.")
+closeAtSessionEnd = input.bool(false, "Flatten at Session End", group="Session Filter", tooltip="Close any open positions on the first bar after the session ends.")
+highlightSession = input.bool(false, "Highlight Session on Chart", group="Session Filter", tooltip="Shade the background during the active session for visual confirmation.")
+
+inSession = useSessionFilter ? not na(time(timeframe.period, sessionString + ":" + sessionDays)) : true
+isSessionClose = useSessionFilter and not inSession and inSession[1]
+
+bgcolor(highlightSession and inSession ? color.new(color.blue, 92) : na, title="Session Highlight")
+
 // =================================
 // ==== Next Bar Classification ====
 // =================================
@@ -393,12 +405,19 @@ if closeOnOppositeSignal
     if startLongTrade and strategy.position_size < 0
         strategy.close("Short", comment="Close Short (Opposite Signal)")
 
-// Strategy entries
-if inDateRange and allowLong and startLongTrade
+// Strategy entries (gated by date range + session filter)
+if inDateRange and inSession and allowLong and startLongTrade
     strategy.entry("Long", strategy.long, comment="Open Long")
 
-if inDateRange and allowShort and startShortTrade
+if inDateRange and inSession and allowShort and startShortTrade
     strategy.entry("Short", strategy.short, comment="Open Short")
+
+// Flatten open positions at session end (optional)
+if closeAtSessionEnd and isSessionClose
+    if strategy.position_size > 0
+        strategy.close("Long", comment="Close Long (Session End)")
+    if strategy.position_size < 0
+        strategy.close("Short", comment="Close Short (Session End)")
 
 // Strategy exits driven by ML model exit signals
 if endLongTrade and strategy.position_size > 0

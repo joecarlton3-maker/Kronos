@@ -1,0 +1,231 @@
+//@version=6
+// RSI 30/50/70 — Long & Short v3
+//
+// v3 changes vs v2 (all audit-recommended patches applied):
+//   1. TP1 qty derived from current position size (no more hardcoded qty=1).
+//   2. Runtime validation: long entry < TP1 < TP2; mirror enforcement for short side.
+//   3. ATR length exposed as an input.
+//   4. Session-end entry cutoff (no entries within N minutes of close).
+//   5. Default session 0930-1600 with America/New_York (US cash session). Switch tz/times for futures.
+//   6. Same-bar TP2 takes precedence over TP1 via if/else-if (no double-close).
+//   7. "Runner" renamed to TP2 throughout. Optional ATR trailing stop for the runner leg.
+//   8. Optional breakeven offset (in ticks) to cover fees + slippage on the runner.
+//   9. Optional asymmetric short-side levels (default still mirrored for backward compat).
+
+strategy("RSI 30/50/70 — Long & Short v3",
+     overlay                 = false,
+     pyramiding              = 0,
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 2,
+     initial_capital         = 25000,
+     commission_type         = strategy.commission.cash_per_contract,
+     commission_value        = 2.50,
+     slippage                = 2,
+     process_orders_on_close = true,
+     calc_on_every_tick      = false,
+     max_bars_back           = 500)
+
+// ====================================================================
+// INPUTS
+// ====================================================================
+
+// --- Indicator parameters
+rsiLen   = input.int(14,  "RSI Length",       minval=2,  group="Strategy")
+atrLen   = input.int(14,  "ATR Length",       minval=2,  group="Strategy",
+                       tooltip="Lookback for ATR used in the pre-TP1 stop distance.")
+stopMult = input.float(1.5, "Stop ATR Multiplier", minval=0.1, step=0.1, group="Strategy",
+                       tooltip="Pre-TP1 stop distance = ATR × multiplier. After TP1 the stop snaps to breakeven (+ optional offset), or trails if enabled.")
+
+// --- Long-side RSI levels (mirrored to short by default)
+entryLvl  = input.float(30, "Long Entry RSI Level", minval=1,  maxval=99, group="Strategy",
+                       tooltip="Long entry: RSI crosses UP through this.")
+tp1Lvl    = input.float(50, "Long TP1 RSI Level",   minval=1,  maxval=99, group="Strategy",
+                       tooltip="Long TP1: RSI crosses UP through this. Closes half. Stop moves to breakeven (+ offset) after fill.")
+tp2Lvl    = input.float(70, "Long TP2 RSI Level",   minval=1,  maxval=99, group="Strategy",
+                       tooltip="Long TP2 (was 'Runner'): RSI crosses UP through this. Closes remainder.")
+
+// --- Short-side (optional asymmetric)
+useSymmetric    = input.bool(true, "Mirror Long Levels for Short Side", group="Short Side",
+                       tooltip="If true, short levels = 100 − (long levels). If false, configure short levels directly below.")
+shortEntryLvlIn = input.float(70, "Short Entry RSI Level", minval=1, maxval=99, group="Short Side")
+shortTp1LvlIn   = input.float(50, "Short TP1 RSI Level",   minval=1, maxval=99, group="Short Side")
+shortTp2LvlIn   = input.float(30, "Short TP2 RSI Level",   minval=1, maxval=99, group="Short Side")
+
+// --- Exit refinements
+beOffsetTicks = input.int(0, "Breakeven Offset (ticks)", minval=0, group="Strategy",
+                       tooltip="After TP1, shift the runner's stop in the trade's favor by this many ticks to cover commission + slippage.")
+useTrail      = input.bool(false, "Use ATR Trailing Stop After TP1", group="Strategy",
+                       tooltip="If on, after TP1 the runner uses an ATR trailing stop (ratcheting only). If off, the runner sits at breakeven (+ offset).")
+trailMult     = input.float(2.0, "Trail ATR Multiplier", minval=0.1, step=0.1, group="Strategy")
+
+// --- Session
+sessionIn        = input.session("0930-1600", "Session Window", group="Session")
+sessionTz        = input.string("America/New_York", "Timezone", group="Session",
+                       options=["America/New_York","America/Chicago","UTC","exchange"],
+                       tooltip="Default 0930-1600 with America/New_York = US equities cash session. For CME futures day session use 0830-1500 with America/Chicago.")
+noEntryBufferMin = input.int(10, "No Entries Within N Minutes of Session Close", minval=0, group="Session",
+                       tooltip="Block new entries within this many minutes of the session end to avoid one-bar force-closes. Set to 0 to disable.")
+
+// ====================================================================
+// INPUT VALIDATION
+// ====================================================================
+
+if barstate.isfirst
+    if entryLvl >= tp1Lvl
+        runtime.error("Long Entry (" + str.tostring(entryLvl) + ") must be < Long TP1 (" + str.tostring(tp1Lvl) + ").")
+    if tp1Lvl >= tp2Lvl
+        runtime.error("Long TP1 (" + str.tostring(tp1Lvl) + ") must be < Long TP2 (" + str.tostring(tp2Lvl) + ").")
+    if not useSymmetric
+        if shortEntryLvlIn <= shortTp1LvlIn
+            runtime.error("Short Entry (" + str.tostring(shortEntryLvlIn) + ") must be > Short TP1 (" + str.tostring(shortTp1LvlIn) + ").")
+        if shortTp1LvlIn <= shortTp2LvlIn
+            runtime.error("Short TP1 (" + str.tostring(shortTp1LvlIn) + ") must be > Short TP2 (" + str.tostring(shortTp2LvlIn) + ").")
+
+// Effective short-side levels (mirror or explicit)
+shortEntryLvl = useSymmetric ? (100.0 - entryLvl) : shortEntryLvlIn
+shortTp1Lvl   = useSymmetric ? (100.0 - tp1Lvl)   : shortTp1LvlIn
+shortTp2Lvl   = useSymmetric ? (100.0 - tp2Lvl)   : shortTp2LvlIn
+
+// ====================================================================
+// CALCULATIONS
+// ====================================================================
+
+rsi = ta.rsi(close, rsiLen)
+atr = ta.atr(atrLen)
+
+inSession = not na(time(timeframe.period, sessionIn, sessionTz))
+
+// Session-end cutoff: parse the final HHMM of the session string.
+// Limitation: for multi-window sessions like "0930-1130,1230-1600" this picks the LAST window's end time (the conservative pick).
+sessionEndStr  = str.length(sessionIn) >= 4 ? str.substring(sessionIn, str.length(sessionIn) - 4, str.length(sessionIn)) : "0000"
+sessionEndHH   = nz(str.tonumber(str.substring(sessionEndStr, 0, 2)), 0)
+sessionEndMM   = nz(str.tonumber(str.substring(sessionEndStr, 2, 4)), 0)
+sessionEndMOD  = sessionEndHH * 60 + sessionEndMM
+curMOD         = hour(time, sessionTz) * 60 + minute(time, sessionTz)
+minsToSessEnd  = sessionEndMOD - curMOD
+nearSessionEnd = inSession and minsToSessEnd >= 0 and minsToSessEnd <= noEntryBufferMin
+
+// Cross-back entry triggers
+longEntryCross  = ta.crossover(rsi,  entryLvl)
+shortEntryCross = ta.crossunder(rsi, shortEntryLvl)
+
+// Scaled-exit triggers
+tp1CrossUp = ta.crossover(rsi,  tp1Lvl)
+tp2CrossUp = ta.crossover(rsi,  tp2Lvl)
+tp1CrossDn = ta.crossunder(rsi, shortTp1Lvl)
+tp2CrossDn = ta.crossunder(rsi, shortTp2Lvl)
+
+// ====================================================================
+// ENTRY CONDITIONS
+// ====================================================================
+
+longEntry  = longEntryCross  and inSession and not nearSessionEnd
+shortEntry = shortEntryCross and inSession and not nearSessionEnd
+
+// ====================================================================
+// TRADE STATE
+// ====================================================================
+
+var float entryATR  = na
+var bool  tp1Done   = false
+var float trailStop = na
+
+if strategy.position_size == 0
+    entryATR  := na
+    tp1Done   := false
+    trailStop := na
+
+// ====================================================================
+// ENTRIES
+// ====================================================================
+
+if longEntry and strategy.position_size == 0
+    entryATR := atr
+    strategy.entry("L", strategy.long)
+
+if shortEntry and strategy.position_size == 0
+    entryATR := atr
+    strategy.entry("S", strategy.short)
+
+// ====================================================================
+// EXITS
+// ====================================================================
+
+beOffset   = beOffsetTicks * syminfo.mintick
+preTp1Dist = nz(entryATR, atr) * stopMult
+
+float longStop  = na
+float shortStop = na
+
+// Long stop: pre-TP1 = entry − ATR×mult; post-TP1 = breakeven floor (or ratcheting trail).
+if strategy.position_size > 0
+    if not tp1Done
+        longStop := strategy.position_avg_price - preTp1Dist
+    else
+        beFloor = strategy.position_avg_price + beOffset
+        if useTrail
+            candidate = math.max(close - atr * trailMult, beFloor)
+            trailStop := na(trailStop) ? candidate : math.max(trailStop, candidate)
+            longStop  := trailStop
+        else
+            longStop := beFloor
+
+// Short stop: mirror.
+if strategy.position_size < 0
+    if not tp1Done
+        shortStop := strategy.position_avg_price + preTp1Dist
+    else
+        beCeil = strategy.position_avg_price - beOffset
+        if useTrail
+            candidate = math.min(close + atr * trailMult, beCeil)
+            trailStop := na(trailStop) ? candidate : math.min(trailStop, candidate)
+            shortStop := trailStop
+        else
+            shortStop := beCeil
+
+// LONG management: TP2 takes precedence over TP1 if both fire same bar.
+if strategy.position_size > 0
+    strategy.exit("X-L", from_entry="L", stop=longStop)
+    if tp2CrossUp
+        strategy.close("L", comment="TP2")
+    else if tp1CrossUp and not tp1Done
+        tp1Qty = math.max(1, math.floor(math.abs(strategy.position_size) / 2))
+        strategy.close("L", comment="TP1", qty=tp1Qty)
+        tp1Done := true
+    if not inSession
+        strategy.close("L", comment="Sess")
+
+// SHORT management: mirror.
+if strategy.position_size < 0
+    strategy.exit("X-S", from_entry="S", stop=shortStop)
+    if tp2CrossDn
+        strategy.close("S", comment="TP2")
+    else if tp1CrossDn and not tp1Done
+        tp1Qty = math.max(1, math.floor(math.abs(strategy.position_size) / 2))
+        strategy.close("S", comment="TP1", qty=tp1Qty)
+        tp1Done := true
+    if not inSession
+        strategy.close("S", comment="Sess")
+
+// ====================================================================
+// VISUALS — LOWER PANE
+// ====================================================================
+
+plot(rsi, "RSI", color=color.new(#00f0ff, 0), linewidth=2)
+
+plot(entryLvl,      "Long Entry Lvl",  color=color.new(color.lime,   40), linewidth=1)
+plot(shortEntryLvl, "Short Entry Lvl", color=color.new(color.red,    40), linewidth=1)
+plot(tp1Lvl,        "Long TP1 Lvl",    color=color.new(color.yellow, 40), linewidth=1)
+plot(shortTp1Lvl,   "Short TP1 Lvl",   color=color.new(color.yellow, 40), linewidth=1)
+plot(tp2Lvl,        "Long TP2 Lvl",    color=color.new(color.red,    40), linewidth=1)
+plot(shortTp2Lvl,   "Short TP2 Lvl",   color=color.new(color.lime,   40), linewidth=1)
+
+bgcolor(inSession      ? color.new(color.green,  95) : na, title="Session bg")
+bgcolor(nearSessionEnd ? color.new(color.orange, 90) : na, title="Near session end (no new entries)")
+
+// ====================================================================
+// VISUALS — PRICE CHART
+// ====================================================================
+
+plotshape(longEntry  and strategy.position_size == 0, "Long sig",  shape.triangleup,   location.belowbar, color.new(color.lime, 0), size=size.tiny, force_overlay=true)
+plotshape(shortEntry and strategy.position_size == 0, "Short sig", shape.triangledown, location.abovebar, color.new(color.red,  0), size=size.tiny, force_overlay=true)

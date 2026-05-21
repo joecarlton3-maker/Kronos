@@ -256,6 +256,8 @@ var bool longArmed      = false
 var bool shortArmed     = false
 var bool longCancelled  = false
 var bool shortCancelled = false
+var bool longPlaced     = false   // entry+exits placed once per day
+var bool shortPlaced    = false
 
 var box  sessBoxObj = na
 var box  ibBoxObj   = na
@@ -289,6 +291,8 @@ if newDay
     shortArmed     := false
     longCancelled  := false
     shortCancelled := false
+    longPlaced     := false
+    shortPlaced    := false
     sessBoxObj  := na
     ibBoxObj    := na
     ibHighLine  := na
@@ -336,32 +340,30 @@ cutoffMin   = parseHHMM(p_cut)
 nowMin      = hour(time, tzInput) * 60 + minute(time, tzInput)
 afterCutoff = p_useCut and nowMin >= cutoffMin
 
-// ----- Cancel-if-TP1-first -----
-if longArmed and not longCancelled and cancelIfTP1First and high >= longTP1 and strategy.position_size == 0
+flat = strategy.position_size == 0
+
+// ----- Cancel-if-TP1-first (only relevant if limit was placed but hasn't filled yet) -----
+if longPlaced and not longCancelled and flat and cancelIfTP1First and high >= longTP1
     longCancelled := true
     strategy.cancel("Long")
-if shortArmed and not shortCancelled and cancelIfTP1First and low <= shortTP1 and strategy.position_size == 0
+if shortPlaced and not shortCancelled and flat and cancelIfTP1First and low <= shortTP1
     shortCancelled := true
     strategy.cancel("Short")
 
 // ============================================================================
-// ORDERS
+// ORDERS  - place each side's bracket exactly once per day.
 // ============================================================================
-flat = strategy.position_size == 0
-
-if ibDone and flat and inSessNow
-    if longArmed and not longCancelled and sizeOk and not afterCutoff
+if ibDone and inSessNow and flat
+    if longArmed and not longPlaced and not longCancelled and sizeOk and not afterCutoff
         strategy.entry("Long", strategy.long, limit=longEntry)
         strategy.exit("L TP1", from_entry="Long", limit=longTP1, qty=1, stop=longStop)
         strategy.exit("L TP2", from_entry="Long", limit=longTP2, qty=1, stop=longStop)
-    else
-        strategy.cancel("Long")
-    if shortArmed and not shortCancelled and sizeOk and not afterCutoff
+        longPlaced := true
+    if shortArmed and not shortPlaced and not shortCancelled and sizeOk and not afterCutoff
         strategy.entry("Short", strategy.short, limit=shortEntry)
         strategy.exit("S TP1", from_entry="Short", limit=shortTP1, qty=1, stop=shortStop)
         strategy.exit("S TP2", from_entry="Short", limit=shortTP2, qty=1, stop=shortStop)
-    else
-        strategy.cancel("Short")
+        shortPlaced := true
 
 // Force-flatten at session close
 if inSessPrev and not inSessNow

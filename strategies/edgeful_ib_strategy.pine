@@ -1,0 +1,414 @@
+//@version=5
+// =============================================================================
+// edgeful - algos - IB strategy  (reverse-engineered from the published version)
+//
+// Concept
+// -------
+// During the New York session, the Initial Balance (IB) is the high/low range
+// formed during the first hour (09:30-10:30 ET by default). Once that range
+// closes, the strategy waits for a breakout above the IB high or below the IB
+// low, and then arms a limit entry at a retracement back inside the IB.
+//
+// Level formulas (rng = IB_high - IB_low):
+//   Long  Entry = IB_high - entry% * rng       (a pullback into IB)
+//   Long  Stop  = IB_high - stop%  * rng       (a deeper pullback)
+//   Long  TP1   = IB_high + tp1%   * rng       (extension above IB)
+//   Long  TP2   = IB_high + tp2%   * rng
+//   Short Entry = IB_low  + entry% * rng       (mirrored)
+//   Short Stop  = IB_low  + stop%  * rng
+//   Short TP1   = IB_low  - tp1%   * rng
+//   Short TP2   = IB_low  - tp2%   * rng
+//
+// Defaults of 25 / 50 / 25 / 50 give R = 25% of IB range, TP1 = 2R, TP2 = 3R.
+// Position size defaults to 2 contracts and scales out 1 at TP1, 1 at TP2.
+//
+// "Cancel entry if TP1 reached first" cancels the pending limit if price
+// extends to TP1 in the breakout direction before the limit fills.
+// =============================================================================
+strategy(
+     title              = "edgeful - algos - IB strategy",
+     overlay            = true,
+     initial_capital    = 100000,
+     default_qty_type   = strategy.fixed,
+     default_qty_value  = 2,
+     pyramiding         = 0,
+     calc_on_every_tick = true,
+     process_orders_on_close = true,
+     max_lines_count    = 500,
+     max_boxes_count    = 500,
+     max_labels_count   = 500
+     )
+
+// ============================================================================
+// GENERAL
+// ============================================================================
+g_gen      = "General"
+entryColor = input.color(color.new(color.gray, 30), "Entry Level Color",     group=g_gen)
+stopColor  = input.color(color.new(color.gray, 30), "Stop-Loss Level Color", group=g_gen)
+
+// ============================================================================
+// ENTRY FILTER
+// ============================================================================
+g_filter = "Entry Filter"
+cancelIfTP1First = input.bool(false, "Cancel entry if TP1 reached first",
+     group   = g_filter,
+     tooltip = "If price reaches TP1 in the breakout direction before the limit entry fills, the pending order is cancelled for the rest of the day.")
+
+// ============================================================================
+// PER-DAY SETTINGS  (Mon-Fri)
+// ============================================================================
+g_mon      = "Monday"
+mon_entry  = input.float(25, "IB retracement entry level %",       group=g_mon, minval=0, maxval=100)
+mon_stop   = input.float(50, "IB retracement stop loss level %",   group=g_mon, minval=0, maxval=100)
+mon_tp1    = input.float(25, "Profit target 1 - IB by levels (%)", group=g_mon, minval=0)
+mon_tp2    = input.float(50, "Profit target 2 - IB by levels (%)", group=g_mon, minval=0)
+mon_min    = input.float(0,  "Min IB size %", group=g_mon, minval=0,
+     tooltip="Minimum IB range as percent of price. 0 disables the filter.")
+mon_max    = input.float(1,  "Max IB size %", group=g_mon, minval=0,
+     tooltip="Maximum IB range as percent of price.")
+mon_long   = input.bool(true,  "Allow long trades",  group=g_mon)
+mon_short  = input.bool(true,  "Allow short trades", group=g_mon)
+mon_useCut = input.bool(false, "Entry cutoff time", group=g_mon, inline="mon_cut")
+mon_cut    = input.string("12:00", "", group=g_mon, inline="mon_cut",
+     tooltip="HH:MM in the session timezone. No new entries after this time.")
+
+g_tue      = "Tuesday"
+tue_entry  = input.float(25, "IB retracement entry level %",       group=g_tue, minval=0, maxval=100)
+tue_stop   = input.float(50, "IB retracement stop loss level %",   group=g_tue, minval=0, maxval=100)
+tue_tp1    = input.float(25, "Profit target 1 - IB by levels (%)", group=g_tue, minval=0)
+tue_tp2    = input.float(50, "Profit target 2 - IB by levels (%)", group=g_tue, minval=0)
+tue_min    = input.float(0,  "Min IB size %", group=g_tue, minval=0)
+tue_max    = input.float(1,  "Max IB size %", group=g_tue, minval=0)
+tue_long   = input.bool(true,  "Allow long trades",  group=g_tue)
+tue_short  = input.bool(true,  "Allow short trades", group=g_tue)
+tue_useCut = input.bool(false, "Entry cutoff time", group=g_tue, inline="tue_cut")
+tue_cut    = input.string("12:00", "", group=g_tue, inline="tue_cut")
+
+g_wed      = "Wednesday"
+wed_entry  = input.float(25, "IB retracement entry level %",       group=g_wed, minval=0, maxval=100)
+wed_stop   = input.float(50, "IB retracement stop loss level %",   group=g_wed, minval=0, maxval=100)
+wed_tp1    = input.float(25, "Profit target 1 - IB by levels (%)", group=g_wed, minval=0)
+wed_tp2    = input.float(50, "Profit target 2 - IB by levels (%)", group=g_wed, minval=0)
+wed_min    = input.float(0,  "Min IB size %", group=g_wed, minval=0)
+wed_max    = input.float(1,  "Max IB size %", group=g_wed, minval=0)
+wed_long   = input.bool(true,  "Allow long trades",  group=g_wed)
+wed_short  = input.bool(true,  "Allow short trades", group=g_wed)
+wed_useCut = input.bool(false, "Entry cutoff time", group=g_wed, inline="wed_cut")
+wed_cut    = input.string("12:00", "", group=g_wed, inline="wed_cut")
+
+g_thu      = "Thursday"
+thu_entry  = input.float(25, "IB retracement entry level %",       group=g_thu, minval=0, maxval=100)
+thu_stop   = input.float(50, "IB retracement stop loss level %",   group=g_thu, minval=0, maxval=100)
+thu_tp1    = input.float(25, "Profit target 1 - IB by levels (%)", group=g_thu, minval=0)
+thu_tp2    = input.float(50, "Profit target 2 - IB by levels (%)", group=g_thu, minval=0)
+thu_min    = input.float(0,  "Min IB size %", group=g_thu, minval=0)
+thu_max    = input.float(1,  "Max IB size %", group=g_thu, minval=0)
+thu_long   = input.bool(true,  "Allow long trades",  group=g_thu)
+thu_short  = input.bool(true,  "Allow short trades", group=g_thu)
+thu_useCut = input.bool(false, "Entry cutoff time", group=g_thu, inline="thu_cut")
+thu_cut    = input.string("12:00", "", group=g_thu, inline="thu_cut")
+
+g_fri      = "Friday"
+fri_entry  = input.float(25, "IB retracement entry level %",       group=g_fri, minval=0, maxval=100)
+fri_stop   = input.float(50, "IB retracement stop loss level %",   group=g_fri, minval=0, maxval=100)
+fri_tp1    = input.float(25, "Profit target 1 - IB by levels (%)", group=g_fri, minval=0)
+fri_tp2    = input.float(50, "Profit target 2 - IB by levels (%)", group=g_fri, minval=0)
+fri_min    = input.float(0,  "Min IB size %", group=g_fri, minval=0)
+fri_max    = input.float(1,  "Max IB size %", group=g_fri, minval=0)
+fri_long   = input.bool(true,  "Allow long trades",  group=g_fri)
+fri_short  = input.bool(true,  "Allow short trades", group=g_fri)
+fri_useCut = input.bool(false, "Entry cutoff time", group=g_fri, inline="fri_cut")
+fri_cut    = input.string("12:00", "", group=g_fri, inline="fri_cut")
+
+// ============================================================================
+// SESSION
+// ============================================================================
+g_sess     = "Session"
+showNY     = input.bool(true,  "Show NY Session?",                       group=g_sess)
+tzInput    = input.string("America/New_York", "Timezone",                group=g_sess)
+sessRange  = input.session("0930-1600", "Session Range",                 group=g_sess)
+boxBorder  = input.int(1, "Box Border", minval=0, maxval=4,              group=g_sess)
+boxStyleIn = input.string("Dashed", "Box Style",
+                          options=["Solid","Dashed","Dotted"],           group=g_sess)
+sessColor  = input.color(color.new(color.aqua, 92), "Session Color",     group=g_sess)
+
+// ============================================================================
+// IB
+// ============================================================================
+g_ib        = "IB"
+ibSess      = input.session("0930-1030", "IB timeframe (ET)",   group=g_ib)
+ibColor     = input.color(color.new(color.navy, 85), "IB session color", group=g_ib)
+ibHighColor = input.color(color.lime, "IB high line color",     group=g_ib)
+ibLowColor  = input.color(color.red,  "IB low line color",      group=g_ib)
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+inWindow(string sess) =>
+    not na(time(timeframe.period, sess, tzInput))
+
+boxStyle = switch boxStyleIn
+    "Solid"  => line.style_solid
+    "Dashed" => line.style_dashed
+    "Dotted" => line.style_dotted
+    => line.style_dashed
+
+parseHHMM(string s) =>
+    arr = str.split(s, ":")
+    h   = array.size(arr) > 0 ? nz(str.tonumber(array.get(arr, 0)), 0.0) : 0.0
+    m   = array.size(arr) > 1 ? nz(str.tonumber(array.get(arr, 1)), 0.0) : 0.0
+    int(h) * 60 + int(m)
+
+dow = dayofweek(time, tzInput)
+
+// ----- Resolve today's parameters -----
+var float p_entry  = 25
+var float p_stop   = 50
+var float p_tp1    = 25
+var float p_tp2    = 50
+var float p_min    = 0
+var float p_max    = 1
+var bool  p_long   = false
+var bool  p_short  = false
+var bool  p_useCut = false
+var string p_cut   = "12:00"
+
+if dow == dayofweek.monday
+    p_entry  := mon_entry
+    p_stop   := mon_stop
+    p_tp1    := mon_tp1
+    p_tp2    := mon_tp2
+    p_min    := mon_min
+    p_max    := mon_max
+    p_long   := mon_long
+    p_short  := mon_short
+    p_useCut := mon_useCut
+    p_cut    := mon_cut
+else if dow == dayofweek.tuesday
+    p_entry  := tue_entry
+    p_stop   := tue_stop
+    p_tp1    := tue_tp1
+    p_tp2    := tue_tp2
+    p_min    := tue_min
+    p_max    := tue_max
+    p_long   := tue_long
+    p_short  := tue_short
+    p_useCut := tue_useCut
+    p_cut    := tue_cut
+else if dow == dayofweek.wednesday
+    p_entry  := wed_entry
+    p_stop   := wed_stop
+    p_tp1    := wed_tp1
+    p_tp2    := wed_tp2
+    p_min    := wed_min
+    p_max    := wed_max
+    p_long   := wed_long
+    p_short  := wed_short
+    p_useCut := wed_useCut
+    p_cut    := wed_cut
+else if dow == dayofweek.thursday
+    p_entry  := thu_entry
+    p_stop   := thu_stop
+    p_tp1    := thu_tp1
+    p_tp2    := thu_tp2
+    p_min    := thu_min
+    p_max    := thu_max
+    p_long   := thu_long
+    p_short  := thu_short
+    p_useCut := thu_useCut
+    p_cut    := thu_cut
+else if dow == dayofweek.friday
+    p_entry  := fri_entry
+    p_stop   := fri_stop
+    p_tp1    := fri_tp1
+    p_tp2    := fri_tp2
+    p_min    := fri_min
+    p_max    := fri_max
+    p_long   := fri_long
+    p_short  := fri_short
+    p_useCut := fri_useCut
+    p_cut    := fri_cut
+else
+    p_long  := false
+    p_short := false
+
+// ============================================================================
+// STATE
+// ============================================================================
+var float ibHigh      = na
+var float ibLow       = na
+var bool  ibDone      = false
+var int   ibStartTime = na
+var int   ibEndTime   = na
+
+var float longEntry  = na
+var float longStop   = na
+var float longTP1    = na
+var float longTP2    = na
+var float shortEntry = na
+var float shortStop  = na
+var float shortTP1   = na
+var float shortTP2   = na
+
+var bool brokeUp        = false
+var bool brokeDown      = false
+var bool longArmed      = false
+var bool shortArmed     = false
+var bool longCancelled  = false
+var bool shortCancelled = false
+
+var box  sessBoxObj = na
+var box  ibBoxObj   = na
+var line ibHighLine = na
+var line ibLowLine  = na
+
+newDay   = ta.change(time("D", tzInput)) != 0
+inIBNow  = inWindow(ibSess)
+inIBPrev = inWindow(ibSess)[1]
+inSessNow = inWindow(sessRange)
+inSessPrev = inWindow(sessRange)[1]
+
+// ----- Reset state at start of a new NY day -----
+if newDay
+    ibHigh      := na
+    ibLow       := na
+    ibDone      := false
+    ibStartTime := na
+    ibEndTime   := na
+    longEntry  := na
+    longStop   := na
+    longTP1    := na
+    longTP2    := na
+    shortEntry := na
+    shortStop  := na
+    shortTP1   := na
+    shortTP2   := na
+    brokeUp        := false
+    brokeDown      := false
+    longArmed      := false
+    shortArmed     := false
+    longCancelled  := false
+    shortCancelled := false
+    sessBoxObj  := na
+    ibBoxObj    := na
+    ibHighLine  := na
+    ibLowLine   := na
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+
+// ----- Build IB during IB window -----
+if inIBNow
+    if na(ibStartTime)
+        ibStartTime := time
+    ibHigh    := na(ibHigh) ? high : math.max(ibHigh, high)
+    ibLow     := na(ibLow)  ? low  : math.min(ibLow,  low)
+    ibEndTime := time + timeframe.in_seconds(timeframe.period) * 1000
+
+// ----- Compute level set on the first bar after IB closes -----
+ibJustClosed = not inIBNow and inIBPrev and not na(ibHigh) and not na(ibLow)
+if ibJustClosed
+    ibDone := true
+    rng = ibHigh - ibLow
+    longEntry  := ibHigh - rng * p_entry / 100.0
+    longStop   := ibHigh - rng * p_stop  / 100.0
+    longTP1    := ibHigh + rng * p_tp1   / 100.0
+    longTP2    := ibHigh + rng * p_tp2   / 100.0
+    shortEntry := ibLow  + rng * p_entry / 100.0
+    shortStop  := ibLow  + rng * p_stop  / 100.0
+    shortTP1   := ibLow  - rng * p_tp1   / 100.0
+    shortTP2   := ibLow  - rng * p_tp2   / 100.0
+
+// ----- Breakout detection -----
+if ibDone
+    if not brokeUp and high > ibHigh
+        brokeUp   := true
+        longArmed := p_long
+    if not brokeDown and low < ibLow
+        brokeDown  := true
+        shortArmed := p_short
+
+// ----- IB-size filter (range as percent of price) -----
+ibRangePct = na(ibHigh) or na(ibLow) ? na : (ibHigh - ibLow) / close * 100.0
+sizeOk     = na(ibRangePct) ? false : (ibRangePct >= p_min and ibRangePct <= p_max)
+
+// ----- Time cutoff -----
+cutoffMin   = parseHHMM(p_cut)
+nowMin      = hour(time, tzInput) * 60 + minute(time, tzInput)
+afterCutoff = p_useCut and nowMin >= cutoffMin
+
+// ----- Cancel-if-TP1-first -----
+if longArmed and not longCancelled and cancelIfTP1First and high >= longTP1 and strategy.position_size == 0
+    longCancelled := true
+    strategy.cancel("Long")
+if shortArmed and not shortCancelled and cancelIfTP1First and low <= shortTP1 and strategy.position_size == 0
+    shortCancelled := true
+    strategy.cancel("Short")
+
+// ============================================================================
+// ORDERS
+// ============================================================================
+flat = strategy.position_size == 0
+
+if ibDone and flat and inSessNow
+    if longArmed and not longCancelled and sizeOk and not afterCutoff
+        strategy.entry("Long", strategy.long, limit=longEntry)
+        strategy.exit("L TP1", from_entry="Long", limit=longTP1, qty=1, stop=longStop)
+        strategy.exit("L TP2", from_entry="Long", limit=longTP2, qty=1, stop=longStop)
+    else
+        strategy.cancel("Long")
+    if shortArmed and not shortCancelled and sizeOk and not afterCutoff
+        strategy.entry("Short", strategy.short, limit=shortEntry)
+        strategy.exit("S TP1", from_entry="Short", limit=shortTP1, qty=1, stop=shortStop)
+        strategy.exit("S TP2", from_entry="Short", limit=shortTP2, qty=1, stop=shortStop)
+    else
+        strategy.cancel("Short")
+
+// Force-flatten at session close
+if inSessPrev and not inSessNow
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+    if strategy.position_size != 0
+        strategy.close_all(comment="EOD")
+
+// ============================================================================
+// VISUALS
+// ============================================================================
+// Session range box + IB box + IB high/low lines, drawn the bar IB closes
+if showNY and ibJustClosed
+    sessBoxObj := box.new(
+         left=ibStartTime, right=ibStartTime, top=ibHigh, bottom=ibLow,
+         bgcolor=sessColor,
+         border_color=color.new(color.aqua, 50),
+         border_style=boxStyle, border_width=boxBorder,
+         xloc=xloc.bar_time)
+    ibBoxObj := box.new(
+         left=ibStartTime, right=ibEndTime, top=ibHigh, bottom=ibLow,
+         bgcolor=ibColor,
+         border_color=color.new(color.navy, 40),
+         border_style=line.style_solid, border_width=boxBorder,
+         xloc=xloc.bar_time)
+    ibHighLine := line.new(
+         x1=ibStartTime, y1=ibHigh, x2=time, y2=ibHigh,
+         color=ibHighColor, width=2, xloc=xloc.bar_time, extend=extend.right)
+    ibLowLine := line.new(
+         x1=ibStartTime, y1=ibLow, x2=time, y2=ibLow,
+         color=ibLowColor, width=2, xloc=xloc.bar_time, extend=extend.right)
+
+// Grow the session box rightward through the rest of the day
+if showNY and ibDone and inSessNow and not na(sessBoxObj)
+    box.set_right(sessBoxObj, time)
+
+// ============================================================================
+// PLOTS  (these become the Style-tab entries the user can toggle)
+// ============================================================================
+showLongLevels  = ibDone and brokeUp   and not longCancelled  and (flat or strategy.position_size > 0)
+showShortLevels = ibDone and brokeDown and not shortCancelled and (flat or strategy.position_size < 0)
+
+plot(showLongLevels  ? longEntry  : na, "Long Entry Price",  color=entryColor,           style=plot.style_linebr, linewidth=1)
+plot(showLongLevels  ? longTP1    : na, "Long TP-1 Price",   color=color.new(color.green, 0), style=plot.style_linebr, linewidth=1)
+plot(showLongLevels  ? longTP2    : na, "Long TP-2 Price",   color=color.new(color.green, 0), style=plot.style_linebr, linewidth=1)
+plot(showLongLevels  ? longStop   : na, "Long Stop Price",   color=stopColor,            style=plot.style_linebr, linewidth=1)
+plot(showShortLevels ? shortEntry : na, "Short Entry Price", color=entryColor,           style=plot.style_linebr, linewidth=1)
+plot(showShortLevels ? shortTP1   : na, "Short TP-1 Price",  color=color.new(color.teal, 0),  style=plot.style_linebr, linewidth=1)
+plot(showShortLevels ? shortTP2   : na, "Short TP-2 Price",  color=color.new(color.teal, 0),  style=plot.style_linebr, linewidth=1)
+plot(showShortLevels ? shortStop  : na, "Short Stop Price",  color=stopColor,            style=plot.style_linebr, linewidth=1)

@@ -20,7 +20,12 @@
 //   Short TP2   = IB_low  - tp2%   * rng
 //
 // Defaults of 25 / 50 / 25 / 50 give R = 25% of IB range, TP1 = 2R, TP2 = 3R.
-// Position size defaults to 2 contracts and scales out 1 at TP1, 1 at TP2.
+//
+// Position sizing (Jan 18 2026 release notes):
+//   Total = N contracts (user input, default 2).
+//   TP1 closes ceil(N/2)  - the larger half for odd N.
+//   TP2 runs floor(N/2)   - the smaller half. Skipped when N=1.
+//   E.g. N=3 -> 2 close at TP1, 1 runs to TP2.
 //
 // "Cancel entry if TP1 reached first" cancels the pending limit if price
 // extends to TP1 in the breakout direction before the limit fills.
@@ -45,6 +50,16 @@ strategy(
 g_gen      = "General"
 entryColor = input.color(color.new(color.gray, 30), "Entry Level Color",     group=g_gen)
 stopColor  = input.color(color.new(color.gray, 30), "Stop-Loss Level Color", group=g_gen)
+
+// ============================================================================
+// POSITION SIZING
+// ============================================================================
+g_pos = "Position Sizing"
+qtyInput = input.int(2, "Position Size (contracts)", group=g_pos, minval=1,
+     tooltip = "Total position size. TP1 closes ceil(N/2) — the larger portion — and TP2 runs the remaining floor(N/2). For N=3, TP1 closes 2 and TP2 runs 1.")
+
+tp1_qty = int(math.ceil(qtyInput / 2.0))
+tp2_qty = qtyInput - tp1_qty
 
 // ============================================================================
 // ENTRY FILTER
@@ -355,14 +370,16 @@ if shortPlaced and not shortCancelled and flat and cancelIfTP1First and low <= s
 // ============================================================================
 if ibDone and inSessNow and flat
     if longArmed and not longPlaced and not longCancelled and sizeOk and not afterCutoff
-        strategy.entry("Long", strategy.long, limit=longEntry)
-        strategy.exit("L TP1", from_entry="Long", limit=longTP1, qty=1, stop=longStop)
-        strategy.exit("L TP2", from_entry="Long", limit=longTP2, qty=1, stop=longStop)
+        strategy.entry("Long", strategy.long, qty=qtyInput, limit=longEntry)
+        strategy.exit("L TP1", from_entry="Long", limit=longTP1, qty=tp1_qty, stop=longStop)
+        if tp2_qty > 0
+            strategy.exit("L TP2", from_entry="Long", limit=longTP2, qty=tp2_qty, stop=longStop)
         longPlaced := true
     if shortArmed and not shortPlaced and not shortCancelled and sizeOk and not afterCutoff
-        strategy.entry("Short", strategy.short, limit=shortEntry)
-        strategy.exit("S TP1", from_entry="Short", limit=shortTP1, qty=1, stop=shortStop)
-        strategy.exit("S TP2", from_entry="Short", limit=shortTP2, qty=1, stop=shortStop)
+        strategy.entry("Short", strategy.short, qty=qtyInput, limit=shortEntry)
+        strategy.exit("S TP1", from_entry="Short", limit=shortTP1, qty=tp1_qty, stop=shortStop)
+        if tp2_qty > 0
+            strategy.exit("S TP2", from_entry="Short", limit=shortTP2, qty=tp2_qty, stop=shortStop)
         shortPlaced := true
 
 // Force-flatten at session close

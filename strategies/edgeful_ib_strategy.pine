@@ -373,7 +373,9 @@ if inSessPrev and not inSessNow
 // ============================================================================
 // VISUALS
 // ============================================================================
-// Session range box + IB box + IB high/low lines, drawn the bar IB closes
+// Session range box + IB box + IB high/low lines, drawn the bar IB closes.
+// The IB lines and session box are bounded to the NY session and stop
+// extending when 16:00 ET is reached so previous days don't bleed forward.
 if showNY and ibJustClosed
     sessBoxObj := box.new(
          left=ibStartTime, right=ibStartTime, top=ibHigh, bottom=ibLow,
@@ -389,20 +391,26 @@ if showNY and ibJustClosed
          xloc=xloc.bar_time)
     ibHighLine := line.new(
          x1=ibStartTime, y1=ibHigh, x2=time, y2=ibHigh,
-         color=ibHighColor, width=2, xloc=xloc.bar_time, extend=extend.right)
+         color=ibHighColor, width=2, xloc=xloc.bar_time)
     ibLowLine := line.new(
          x1=ibStartTime, y1=ibLow, x2=time, y2=ibLow,
-         color=ibLowColor, width=2, xloc=xloc.bar_time, extend=extend.right)
+         color=ibLowColor, width=2, xloc=xloc.bar_time)
 
-// Grow the session box rightward through the rest of the day
-if showNY and ibDone and inSessNow and not na(sessBoxObj)
-    box.set_right(sessBoxObj, time)
+// Grow the session box and IB high/low lines rightward through the session,
+// then freeze them when 16:00 ET passes.
+if showNY and ibDone and inSessNow
+    if not na(sessBoxObj)
+        box.set_right(sessBoxObj, time)
+    if not na(ibHighLine)
+        line.set_x2(ibHighLine, time)
+    if not na(ibLowLine)
+        line.set_x2(ibLowLine, time)
 
 // ============================================================================
 // PLOTS  (these become the Style-tab entries the user can toggle)
 // ============================================================================
-showLongLevels  = ibDone and brokeUp   and not longCancelled  and (flat or strategy.position_size > 0)
-showShortLevels = ibDone and brokeDown and not shortCancelled and (flat or strategy.position_size < 0)
+showLongLevels  = ibDone and brokeUp   and not longCancelled  and inSessNow and (flat or strategy.position_size > 0)
+showShortLevels = ibDone and brokeDown and not shortCancelled and inSessNow and (flat or strategy.position_size < 0)
 
 plot(showLongLevels  ? longEntry  : na, "Long Entry Price",  color=entryColor,           style=plot.style_linebr, linewidth=1)
 plot(showLongLevels  ? longTP1    : na, "Long TP-1 Price",   color=color.new(color.green, 0), style=plot.style_linebr, linewidth=1)

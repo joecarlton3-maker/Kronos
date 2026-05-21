@@ -1,0 +1,117 @@
+//@version=5
+// Multiple Frame Strategy
+// Execution chart: 5 min. Higher-timeframe trend filter: 60 min.
+//
+// Bullish Trade
+//   - 60-min: price > 20 EMA AND RSI > 50
+//   - 5-min:  bullish crossover of 10/20 EMA AND RSI > 50
+//   - Exit:   price extended above EMAs OR bearish RSI divergence
+//             (also exits on a 10/20 EMA bearish crossover)
+//
+// Bearish Trade
+//   - 60-min: price < 20 EMA AND RSI < 50
+//   - 5-min:  bearish crossover of 10/20 EMA AND RSI < 50
+//   - Exit:   price extended below EMAs OR bullish RSI divergence
+//             (also exits on a 10/20 EMA bullish crossover)
+
+strategy("Multiple Frame Strategy", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     pyramiding=0, calc_on_every_tick=false, process_orders_on_close=true)
+
+// ---------- Inputs ----------
+htf          = input.timeframe("60",  "Higher Timeframe")
+emaFastLen   = input.int(10,          "Fast EMA Length", minval=1)
+emaSlowLen   = input.int(20,          "Slow EMA Length", minval=1)
+rsiLen       = input.int(14,          "RSI Length",      minval=1)
+rsiMid       = input.int(50,          "RSI Midline")
+extPct       = input.float(1.0,       "Exit: % extension from fast EMA",
+                           minval=0.0, step=0.1) / 100.0
+useDiv       = input.bool(true,       "Use RSI divergence for exit")
+divLookback  = input.int(5,           "Divergence pivot lookback", minval=1)
+allowLong    = input.bool(true,       "Allow long trades")
+allowShort   = input.bool(true,       "Allow short trades")
+
+// ---------- 5-min (chart) calculations ----------
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+rsi5    = ta.rsi(close, rsiLen)
+
+bullCross = ta.crossover(emaFast, emaSlow)
+bearCross = ta.crossunder(emaFast, emaSlow)
+
+// ---------- 60-min (HTF) calculations ----------
+[htfClose, htfEmaSlow, htfRsi] = request.security(
+     syminfo.tickerid, htf,
+     [close, ta.ema(close, emaSlowLen), ta.rsi(close, rsiLen)],
+     barmerge.gaps_off, barmerge.lookahead_off)
+
+htfBullish = htfClose > htfEmaSlow and htfRsi > rsiMid
+htfBearish = htfClose < htfEmaSlow and htfRsi < rsiMid
+
+// ---------- Entry signals ----------
+longSignal  = allowLong  and bullCross and rsi5 > rsiMid and htfBullish
+shortSignal = allowShort and bearCross and rsi5 < rsiMid and htfBearish
+
+// ---------- "Extended" exit ----------
+extendedUp   = close > emaFast * (1 + extPct)
+extendedDown = close < emaFast * (1 - extPct)
+
+// ---------- RSI divergence (pivot-based) ----------
+ph    = ta.pivothigh(high, divLookback, divLookback)
+pl    = ta.pivotlow(low,   divLookback, divLookback)
+rsiPh = ta.pivothigh(rsi5, divLookback, divLookback)
+rsiPl = ta.pivotlow(rsi5,  divLookback, divLookback)
+
+var float lastPH    = na
+var float lastRsiPH = na
+var float lastPL    = na
+var float lastRsiPL = na
+
+bearDiv = false
+bullDiv = false
+
+if not na(ph) and not na(rsiPh)
+    if not na(lastPH) and not na(lastRsiPH)
+        bearDiv := ph > lastPH and rsiPh < lastRsiPH
+    lastPH    := ph
+    lastRsiPH := rsiPh
+
+if not na(pl) and not na(rsiPl)
+    if not na(lastPL) and not na(lastRsiPL)
+        bullDiv := pl < lastPL and rsiPl > lastRsiPL
+    lastPL    := pl
+    lastRsiPL := rsiPl
+
+// ---------- Plots ----------
+plot(emaFast,    "EMA Fast (10)",  color=color.red,    linewidth=2)
+plot(emaSlow,    "EMA Slow (20)",  color=color.black,  linewidth=2)
+plot(htfEmaSlow, "HTF EMA Slow",   color=color.orange, linewidth=1)
+
+plotshape(longSignal,  "Long Entry",  shape.triangleup,   location.belowbar, color.new(color.green, 0), size=size.small)
+plotshape(shortSignal, "Short Entry", shape.triangledown, location.abovebar, color.new(color.red,   0), size=size.small)
+plotshape(bearDiv,     "Bear Div",    shape.xcross,       location.abovebar, color.new(color.maroon,0), size=size.tiny)
+plotshape(bullDiv,     "Bull Div",    shape.xcross,       location.belowbar, color.new(color.teal,  0), size=size.tiny)
+
+bgcolor(htfBullish ? color.new(color.green, 92) : htfBearish ? color.new(color.red, 92) : na, title="HTF Bias")
+
+// ---------- Strategy orders ----------
+if longSignal
+    strategy.entry("Long",  strategy.long)
+
+if shortSignal
+    strategy.entry("Short", strategy.short)
+
+longExitCond  = extendedUp   or (useDiv and bearDiv) or bearCross
+shortExitCond = extendedDown or (useDiv and bullDiv) or bullCross
+
+if strategy.position_size > 0 and longExitCond
+    strategy.close("Long",  comment="Exit Long")
+
+if strategy.position_size < 0 and shortExitCond
+    strategy.close("Short", comment="Exit Short")
+
+// ---------- Alerts ----------
+alertcondition(longSignal,  "Long Entry",  "Multiple Frame Strategy: LONG entry")
+alertcondition(shortSignal, "Short Entry", "Multiple Frame Strategy: SHORT entry")
+alertcondition(longExitCond  and strategy.position_size > 0, "Long Exit",  "Multiple Frame Strategy: LONG exit")
+alertcondition(shortExitCond and strategy.position_size < 0, "Short Exit", "Multiple Frame Strategy: SHORT exit")

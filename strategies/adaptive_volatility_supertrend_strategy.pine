@@ -1,0 +1,205 @@
+//@version=6
+// =============================================================================
+// Adaptive Volatility SuperTrend  (strategy)
+// -----------------------------------------------------------------------------
+// Backtestable version of the adaptive SuperTrend. The ATR multiplier adapts to
+// the volatility regime and trend efficiency; the SuperTrend flip drives
+// entries, with an optional HTF trend filter, protective ATR stop, R-multiple
+// take-profit, session gate, and risk-based position sizing.
+//
+// Design notes (see strategies/README.md):
+//   * Entries fire only on CONFIRMED flips (barstate.isconfirmed) and, with
+//     process_orders_on_close + calc_on_every_tick=false, fill next bar open —
+//     so the backtest is non-repainting and reproducible.
+//   * Commission and slippage are ON by default. TradingView's zero-cost
+//     default flatters every strategy; the numbers below are placeholders —
+//     set them to your instrument/broker before trusting a result.
+//   * Kept deliberately lean (few gates) to resist curve-fitting. Validate with
+//     a parameter sweep and, ideally, Kronos synthetic K-lines before sizing up.
+// =============================================================================
+strategy("Adaptive Volatility SuperTrend Strategy",
+     overlay                 = true,
+     pyramiding              = 0,
+     default_qty_type        = strategy.percent_of_equity,
+     default_qty_value       = 100,
+     initial_capital         = 10000,
+     commission_type         = strategy.commission.percent,
+     commission_value        = 0.04,
+     slippage                = 1,
+     process_orders_on_close = true,
+     calc_on_every_tick      = false,
+     max_bars_back           = 500)
+
+// -----------------------------------------------------------------------------
+// INPUTS — Core / Volatility / Efficiency (mirrors the indicator)
+// -----------------------------------------------------------------------------
+atrLen      = input.int(10,   "ATR Length",                minval = 1,                 group = "Core")
+baseMult    = input.float(2.8,"Base Multiplier",           minval = 0.1, step = 0.1,   group = "Core")
+srcBasis    = input.string("hl2", "Band Basis",            options = ["hl2","close","ohlc4"], group = "Core")
+
+volLookback = input.int(100,  "Volatility Baseline Bars",  minval = 20,                group = "Volatility")
+gamma       = input.float(0.65,"Volatility Elasticity",    minval = 0.1, maxval = 1.5, step = 0.05, group = "Volatility")
+minMult     = input.float(1.8,"Minimum Multiplier",        minval = 0.1, step = 0.1,   group = "Volatility")
+maxMult     = input.float(4.2,"Maximum Multiplier",        minval = 0.1, step = 0.1,   group = "Volatility")
+smoothLen   = input.int(5,    "Multiplier Smoothing",      minval = 1,                 group = "Volatility")
+
+useER       = input.bool(true,"Use Efficiency-Ratio Adjustment",                       group = "Efficiency Ratio")
+erLen       = input.int(20,   "ER Length",                 minval = 2,                 group = "Efficiency Ratio")
+erBase      = input.float(1.08,"ER Neutral Factor",        minval = 0.5, maxval = 1.5, step = 0.01, group = "Efficiency Ratio")
+erSlope     = input.float(0.28,"ER Trend Tightening",      minval = 0.0, maxval = 1.0, step = 0.01, group = "Efficiency Ratio")
+flipBufAtr  = input.float(0.0,"Flip Confirmation Buffer (ATR)", minval = 0.0, step = 0.1, group = "Signals")
+
+// -----------------------------------------------------------------------------
+// INPUTS — Trade management
+// -----------------------------------------------------------------------------
+tradeDir    = input.string("Both", "Trade Direction", options = ["Both","Long Only","Short Only"], group = "Trades")
+useHtf      = input.bool(false, "HTF Trend Filter",                                    group = "Trades",
+                 tooltip = "Only take longs above / shorts below the HTF EMA. Non-repainting.")
+htfTf       = input.timeframe("240", "HTF Timeframe",                                  group = "Trades")
+htfEmaLen   = input.int(50,   "HTF EMA Length",            minval = 2,                 group = "Trades")
+
+useHardStop = input.bool(true, "Protective ATR Stop",                                  group = "Risk")
+hardStopAtr = input.float(3.0,"Hard Stop (ATR from entry)",minval = 0.1, step = 0.1,   group = "Risk",
+                 tooltip = "Captured at entry. Backstop for a gap through the SuperTrend line.")
+useTP       = input.bool(false,"Fixed Take-Profit",                                    group = "Risk")
+tpR         = input.float(2.0,"Take-Profit (R multiple)",  minval = 0.1, step = 0.1,   group = "Risk")
+
+useRisk     = input.bool(false,"Risk-based Position Sizing",                           group = "Risk",
+                 tooltip = "Size each trade to risk a fixed % of equity to the hard stop. Overrides default qty.")
+riskPct     = input.float(1.0,"Risk per Trade (%)",        minval = 0.1, maxval = 100, step = 0.1, group = "Risk")
+
+// -----------------------------------------------------------------------------
+// INPUTS — Session (default off; Kronos targets 24/7 crypto)
+// -----------------------------------------------------------------------------
+useSession   = input.bool(false, "Restrict to session",                               group = "Session")
+sessionInput = input.session("0930-1600", "Session",                                  group = "Session")
+sessionTz    = input.string("America/New_York", "Timezone",
+                 options = ["America/New_York","America/Chicago","UTC","exchange"],    group = "Session")
+useFlatten   = input.bool(false, "Flatten at session end",                            group = "Session")
+
+// -----------------------------------------------------------------------------
+// 1-4. Adaptive multiplier (identical math to the indicator)
+// -----------------------------------------------------------------------------
+atr       = ta.atr(atrLen)
+atrPct    = atr / close
+atrPctRef = ta.ema(atrPct, volLookback)
+volRatio  = atrPctRef > 0 ? atrPct / atrPctRef : 1.0
+
+rawMult   = baseMult * math.pow(volRatio, gamma)
+volMult   = math.max(minMult, math.min(maxMult, rawMult))
+
+netMove   = math.abs(close - close[erLen])
+pathMove  = ta.sum(math.abs(ta.change(close)), erLen)
+er        = pathMove > 0 ? netMove / pathMove : 0.0
+erFactor  = useER ? (erBase - erSlope * er) : 1.0
+
+targetMult   = math.max(minMult, math.min(maxMult, volMult * erFactor))
+adaptiveMult = ta.ema(targetMult, smoothLen)
+
+// -----------------------------------------------------------------------------
+// 5. SuperTrend
+// -----------------------------------------------------------------------------
+basis = switch srcBasis
+    "close" => close
+    "ohlc4" => ohlc4
+    => hl2
+
+offset     = adaptiveMult * atr
+flipBuffer = flipBufAtr * atr
+basicUpper = basis + offset
+basicLower = basis - offset
+
+var float finalUpper = na
+var float finalLower = na
+var int   direction  = 1
+
+finalUpper := na(finalUpper[1]) ? basicUpper : (basicUpper < finalUpper[1] or close[1] > finalUpper[1]) ? basicUpper : finalUpper[1]
+finalLower := na(finalLower[1]) ? basicLower : (basicLower > finalLower[1] or close[1] < finalLower[1]) ? basicLower : finalLower[1]
+
+direction := na(direction[1]) ? 1 : direction[1] == -1 and close > finalUpper[1] + flipBuffer ? 1 : direction[1] == 1 and close < finalLower[1] - flipBuffer ? -1 : direction[1]
+
+adaptiveST = direction == 1 ? finalLower : finalUpper
+
+flippedUp   = direction == 1  and direction[1] == -1 and barstate.isconfirmed
+flippedDown = direction == -1 and direction[1] == 1  and barstate.isconfirmed
+
+// -----------------------------------------------------------------------------
+// FILTERS  (HTF trend + session) — both non-repainting
+// -----------------------------------------------------------------------------
+htfEma   = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen)[1], lookahead = barmerge.lookahead_off)
+htfLongOk  = not useHtf or close > htfEma
+htfShortOk = not useHtf or close < htfEma
+
+inSession   = not useSession or not na(time(timeframe.period, sessionInput, sessionTz))
+sessionEnd  = useSession and useFlatten and inSession[1] and not inSession
+
+allowLong  = (tradeDir == "Both" or tradeDir == "Long Only")  and htfLongOk  and inSession
+allowShort = (tradeDir == "Both" or tradeDir == "Short Only") and htfShortOk and inSession
+
+// -----------------------------------------------------------------------------
+// SIZING — capture ATR at entry so the stop distance is fixed for the trade
+// -----------------------------------------------------------------------------
+var float entryAtr = na
+
+calcQty(stopDistance) =>
+    riskCash = strategy.equity * riskPct / 100.0
+    stopDistance > 0 ? math.max(1, math.floor(riskCash / stopDistance)) : na
+
+// -----------------------------------------------------------------------------
+// ENTRIES
+// -----------------------------------------------------------------------------
+enterLong  = flippedUp   and allowLong
+enterShort = flippedDown and allowShort
+
+if enterLong
+    entryAtr := atr
+    if useRisk
+        strategy.entry("L", strategy.long, qty = calcQty(atr * hardStopAtr))
+    else
+        strategy.entry("L", strategy.long)
+
+if enterShort
+    entryAtr := atr
+    if useRisk
+        strategy.entry("S", strategy.short, qty = calcQty(atr * hardStopAtr))
+    else
+        strategy.entry("S", strategy.short)
+
+// -----------------------------------------------------------------------------
+// EXITS
+//   * Opposite flip: reverse (Both) or flat close (single-direction) — handled
+//     because strategy.entry on the opposite side reverses the position.
+//   * SuperTrend line acts as the trailing stop.
+//   * Optional protective hard stop and R-multiple take-profit.
+// -----------------------------------------------------------------------------
+stopDist = nz(entryAtr, atr) * hardStopAtr
+
+if strategy.position_size > 0
+    trailStop = adaptiveST
+    hardStop  = strategy.position_avg_price - stopDist
+    longStop  = useHardStop ? math.max(trailStop, hardStop) : trailStop
+    longTP    = useTP ? strategy.position_avg_price + stopDist * tpR : na
+    strategy.exit("X-L", from_entry = "L", stop = longStop, limit = longTP)
+    // Single-direction mode: no opposite entry to reverse us, so close on flip.
+    if flippedDown and tradeDir == "Long Only"
+        strategy.close("L", comment = "Flip")
+
+if strategy.position_size < 0
+    trailStop = adaptiveST
+    hardStop  = strategy.position_avg_price + stopDist
+    shortStop = useHardStop ? math.min(trailStop, hardStop) : trailStop
+    shortTP   = useTP ? strategy.position_avg_price - stopDist * tpR : na
+    strategy.exit("X-S", from_entry = "S", stop = shortStop, limit = shortTP)
+    if flippedUp and tradeDir == "Short Only"
+        strategy.close("S", comment = "Flip")
+
+if sessionEnd and strategy.position_size != 0
+    strategy.close_all(comment = "EOD")
+
+// -----------------------------------------------------------------------------
+// PLOTS
+// -----------------------------------------------------------------------------
+plot(direction == 1 ? adaptiveST : na, "Up Trend",   color = color.lime, linewidth = 2, style = plot.style_linebr)
+plot(direction == 1 ? na : adaptiveST, "Down Trend", color = color.red,  linewidth = 2, style = plot.style_linebr)
+plot(useHtf ? htfEma : na, "HTF EMA", color = color.new(color.orange, 30))
+plot(adaptiveMult, "Adaptive Multiplier", color = color.aqua, display = display.data_window)

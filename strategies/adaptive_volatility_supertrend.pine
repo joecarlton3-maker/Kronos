@@ -1,0 +1,113 @@
+//@version=6
+// =============================================================================
+// Adaptive Volatility SuperTrend  (indicator)
+// -----------------------------------------------------------------------------
+// A SuperTrend whose ATR multiplier adapts to the current volatility regime and,
+// optionally, to trend efficiency. Wider bands in choppy / high-relative-vol
+// conditions (fewer whipsaws), tighter bands in clean trends (locks gains).
+//
+// Improvements over the original core:
+//   * v6, non-repainting flip signals (gated on barstate.isconfirmed)
+//   * every magic number is a tunable, tooltipped input
+//   * optional flip-confirmation buffer to cut whipsaws
+//   * guarded math (no div-by-zero, no na propagation on warm-up bars)
+//   * proper band fill, confirmed buy/sell markers, and alerts
+// =============================================================================
+indicator("Adaptive Volatility SuperTrend", overlay = true, max_bars_back = 500)
+
+// -----------------------------------------------------------------------------
+// INPUTS
+// -----------------------------------------------------------------------------
+atrLen      = input.int(10,   "ATR Length",                minval = 1,                 group = "Core")
+baseMult    = input.float(2.8,"Base Multiplier",           minval = 0.1, step = 0.1,   group = "Core")
+srcBasis    = input.string("hl2", "Band Basis",            options = ["hl2","close","ohlc4"], group = "Core")
+
+volLookback = input.int(100,  "Volatility Baseline Bars",  minval = 20,                group = "Volatility")
+gamma       = input.float(0.65,"Volatility Elasticity",    minval = 0.1, maxval = 1.5, step = 0.05, group = "Volatility",
+                 tooltip = "How strongly the multiplier reacts to the vol regime. 0 = ignore, 1 = linear, >1 = aggressive.")
+minMult     = input.float(1.8,"Minimum Multiplier",        minval = 0.1, step = 0.1,   group = "Volatility")
+maxMult     = input.float(4.2,"Maximum Multiplier",        minval = 0.1, step = 0.1,   group = "Volatility")
+smoothLen   = input.int(5,    "Multiplier Smoothing",      minval = 1,                 group = "Volatility")
+
+useER       = input.bool(true,"Use Efficiency-Ratio Adjustment",                       group = "Efficiency Ratio")
+erLen       = input.int(20,   "ER Length",                 minval = 2,                 group = "Efficiency Ratio")
+erBase      = input.float(1.08,"ER Neutral Factor",        minval = 0.5, maxval = 1.5, step = 0.01, group = "Efficiency Ratio",
+                 tooltip = "Multiplier factor when the market is pure chop (ER = 0).")
+erSlope     = input.float(0.28,"ER Trend Tightening",      minval = 0.0, maxval = 1.0, step = 0.01, group = "Efficiency Ratio",
+                 tooltip = "How much a clean trend (ER = 1) tightens the band. Factor = erBase - erSlope*ER.")
+
+flipBufAtr  = input.float(0.0,"Flip Confirmation Buffer (ATR)", minval = 0.0, step = 0.1, group = "Signals",
+                 tooltip = "Require close to exceed the band by this many ATRs before flipping. 0 = classic SuperTrend.")
+showFills   = input.bool(true, "Shade trend fill",                                     group = "Signals")
+
+// -----------------------------------------------------------------------------
+// 1. Volatility regime  (normalize ATR by price so it is comparable over time)
+// -----------------------------------------------------------------------------
+atr       = ta.atr(atrLen)
+atrPct    = atr / close
+atrPctRef = ta.ema(atrPct, volLookback)
+volRatio  = atrPctRef > 0 ? atrPct / atrPctRef : 1.0
+
+// 2. Volatility-driven multiplier
+rawMult   = baseMult * math.pow(volRatio, gamma)
+volMult   = math.max(minMult, math.min(maxMult, rawMult))
+
+// 3. Optional trend-efficiency adjustment (Kaufman efficiency ratio)
+netMove   = math.abs(close - close[erLen])
+pathMove  = ta.sum(math.abs(ta.change(close)), erLen)
+er        = pathMove > 0 ? netMove / pathMove : 0.0
+erFactor  = useER ? (erBase - erSlope * er) : 1.0
+
+// 4. Smooth and clamp the final multiplier
+targetMult   = math.max(minMult, math.min(maxMult, volMult * erFactor))
+adaptiveMult = ta.ema(targetMult, smoothLen)
+
+// -----------------------------------------------------------------------------
+// 5. Dynamic SuperTrend
+// -----------------------------------------------------------------------------
+basis = switch srcBasis
+    "close" => close
+    "ohlc4" => ohlc4
+    => hl2
+
+offset      = adaptiveMult * atr
+flipBuffer  = flipBufAtr * atr
+basicUpper  = basis + offset
+basicLower  = basis - offset
+
+var float finalUpper = na
+var float finalLower = na
+var int   direction  = 1
+
+finalUpper := na(finalUpper[1]) ? basicUpper : (basicUpper < finalUpper[1] or close[1] > finalUpper[1]) ? basicUpper : finalUpper[1]
+finalLower := na(finalLower[1]) ? basicLower : (basicLower > finalLower[1] or close[1] < finalLower[1]) ? basicLower : finalLower[1]
+
+direction := na(direction[1]) ? 1 : direction[1] == -1 and close > finalUpper[1] + flipBuffer ? 1 : direction[1] == 1 and close < finalLower[1] - flipBuffer ? -1 : direction[1]
+
+adaptiveST = direction == 1 ? finalLower : finalUpper
+
+// Confirmed (non-repainting) flip events
+flippedUp   = direction == 1  and direction[1] == -1 and barstate.isconfirmed
+flippedDown = direction == -1 and direction[1] == 1  and barstate.isconfirmed
+
+// -----------------------------------------------------------------------------
+// PLOTS
+// -----------------------------------------------------------------------------
+upPlot = plot(direction == 1 ? adaptiveST : na, "Up Trend",   color = color.lime, linewidth = 2, style = plot.style_linebr)
+dnPlot = plot(direction == 1 ? na : adaptiveST, "Down Trend", color = color.red,  linewidth = 2, style = plot.style_linebr)
+midPlot = plot(showFills ? close : na, "", display = display.none, editable = false)
+
+fill(upPlot, midPlot, color = showFills ? color.new(color.lime, 88) : na, title = "Up Fill")
+fill(dnPlot, midPlot, color = showFills ? color.new(color.red, 88)  : na, title = "Down Fill")
+
+plotshape(flippedUp,   "Buy",  style = shape.labelup,   location = location.belowbar, color = color.lime, textcolor = color.black, text = "▲")
+plotshape(flippedDown, "Sell", style = shape.labeldown, location = location.abovebar, color = color.red,  textcolor = color.white, text = "▼")
+
+plot(adaptiveMult, "Adaptive Multiplier", color = color.aqua, display = display.data_window)
+plot(er,           "Efficiency Ratio",    color = color.orange, display = display.data_window)
+
+// -----------------------------------------------------------------------------
+// ALERTS  (indicator uses alertcondition; fire only on confirmed flips)
+// -----------------------------------------------------------------------------
+alertcondition(flippedUp,   "Adaptive ST: Long flip",  "Adaptive SuperTrend flipped LONG")
+alertcondition(flippedDown, "Adaptive ST: Short flip", "Adaptive SuperTrend flipped SHORT")

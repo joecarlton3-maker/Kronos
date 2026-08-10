@@ -2,15 +2,12 @@
 indicator("13/48/200 EMA Fan + Key Levels Bias System", shorttitle="EMA Fan Bias", overlay=true, max_labels_count=100)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Intraday bias + signal system:
-//   • 13 / 48 / 200 EMA fan (trend + "who's in control")
-//   • Previous Day High/Low zones, Pre-Market High/Low levels
-//   • The 4 level plays: PDH break&retest (bull), PDH reject (bear),
-//     PDL bounce (bull), PDL break&retest (bear)
-//   • 13/48 EMA dip entries with first-dip / re-add tracking
-//   • Micro bull/bear flag breaks
-//   • 13x48 EMA cross reversal confirmation
-//   • Bullish bias checklist table
+// Intraday bias + signal DASHBOARD. The chart stays clean: EMAs, PDH/PDL
+// zones, PMH/PML lines, momentum ribbon — nothing else. All signals (EMA
+// dips, flags, level plays, HTF-confirmed PMH/PML breaks, reversal
+// confirmations) run silently through the full discipline stack (RTH only,
+// 9:45+, chop filter, fan-spread momentum, bias alignment, cooldowns) and
+// report to the dashboard table + alerts. You make the trading call.
 // Best on 2m–15m charts with extended hours ON (needed for pre-market levels).
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -32,7 +29,6 @@ colPD   = input.color(#2962ff, "PDH / PDL", group=grpL, inline="lvlc")
 colPM   = input.color(#787b86, "PMH / PML", group=grpL, inline="lvlc")
 
 grpS       = "Signals"
-sigStyle   = input.string("Minimal (BUY / SELL)", "Signal style", options=["Minimal (BUY / SELL)", "Detailed tags"], group=grpS, tooltip="Minimal: one green BUY and one red SELL marker driven by the full confluence engine. Detailed: the individual tags (DIP, B&R, BRK, REV...) for studying charts.")
 showDips   = input.bool(true, "EMA pullback (dip) signals", group=grpS)
 showFlags  = input.bool(true, "Micro flag break signals", group=grpS)
 showCross  = input.bool(true, "13/48 EMA cross + reversal confirmation", group=grpS)
@@ -55,10 +51,8 @@ showTable = input.bool(true, "Bias checklist table", group=grpT)
 tblPosStr = input.string("Top right", "Table position", options=["Top right", "Top left", "Bottom right", "Bottom left"], group=grpT)
 
 grpV       = "Visuals"
-showBarCol = input.bool(true, "Regime bar coloring", group=grpV, tooltip="Gray candles = stand down (chop or bunched EMAs). Solid teal/red = momentum regime. Faded teal/red = trend without spread.")
 showRibbon = input.bool(true, "13/48 momentum ribbon", group=grpV, tooltip="Band between the 13 and 48 EMAs. Near-invisible when they braid, solid as the fan opens — momentum strength at a glance.")
 fadeChop   = input.bool(true, "Fade 13/48 EMAs when bunched", group=grpV)
-showBiasBg = input.bool(false, "Faint bias background tint", group=grpV)
 
 // ─── EMA fan ─────────────────────────────────────────────────────────────────
 ema13  = ta.ema(close, len13)
@@ -208,9 +202,6 @@ if pmlBreakSig
 inChop   = not na(pmHigh) and not na(pmLow) and close < pmHigh and close > pmLow
 chopMute = chopFilter and inChop
 
-// Visual stand-down state: inside the pre-market range OR EMAs bunched
-visualChop = inChop or bunched
-
 // ─── EMA dip / pop signals ───────────────────────────────────────────────────
 touch13  = low <= ema13 and low[1] > ema13[1]
 touch48  = low <= ema48 and low[1] > ema48[1]
@@ -230,18 +221,6 @@ crossBearSig = crossBear and xSpaced and not chopMute and sigSession and barstat
 if crossBull or crossBear
     lastXBar := bar_index
 
-// First dip vs. re-add tracking: count resets when the leg breaks (close under 48)
-legEndBull = ta.crossunder(close, ema48)
-
-var int dipCount = 0
-if legEndBull or crossBear
-    dipCount := 0
-if dip13Sig
-    dipCount += 1
-dip13First = dip13Sig and dipCount == 1
-dip13ReAdd = dip13Sig and dipCount == 2
-dip13Later = dip13Sig and dipCount > 2
-
 // ─── Micro flag breaks ───────────────────────────────────────────────────────
 // Two lower-high pullback bars holding the fan, then a close through the prior high
 bullFlagSig = momoUp and close > ema13 and low > ema48 and close > high[1] and high[1] < high[2] and high[2] < high[3] and not chopMute and sigSession and barstate.isconfirmed
@@ -251,13 +230,11 @@ bearFlagSig = momoDn and close < ema13 and high < ema48 and close < low[1] and l
 revConfBear = crossBearSig and not na(lastRejBar) and bar_index - lastRejBar <= 20
 revConfBull = crossBullSig and not na(lastBncBar) and bar_index - lastBncBar <= 20
 
-// ─── Composite BUY / SELL — one green arrow, one red arrow ───────────────────
+// ─── Composite BUY / SELL — feeds the dashboard and alerts, not the chart ────
 // Bias-aligned: no SELL above the 13/48, no BUY below it. A raw PDH rejection
 // or PDL bounce is only a FIRST confirmation — it arms the REV signal (level
 // play + EMA cross agree), which is the actual reversal entry. The composite
 // is also chop-muted, except PMH/PML breaks: those are the exit from chop.
-minimal = sigStyle == "Minimal (BUY / SELL)"
-
 buyRaw  = ((showDips and (dip13Sig or dip48Sig)) or (showFlags and bullFlagSig) or (showLevels and (retestPdhSig or pdhSupSig)) or (showCross and revConfBull)) and close > ema48 and not chopMute
 buyRaw := buyRaw or (showLevels and pmhBreakSig)
 sellRaw  = ((showDips and pop13Sig) or (showFlags and bearFlagSig) or (showLevels and (retestPdlSig or pdlResSig)) or (showCross and revConfBear)) and close < ema48 and not chopMute
@@ -269,6 +246,26 @@ buySig  = buyRaw and canComp
 sellSig = sellRaw and canComp
 if buySig or sellSig
     lastCompBar := bar_index
+
+// Name the setup and remember the day's latest signal per side for the dashboard
+buyReason  = dip13Sig ? "13 EMA dip" : dip48Sig ? "48 EMA dip" : bullFlagSig ? "bull flag break" : pmhBreakSig ? "PMH break confirmed" : retestPdhSig ? "PDH break & retest held" : pdhSupSig ? "PDH held as support" : revConfBull ? "reversal confirmed up" : "confluence"
+sellReason = pop13Sig ? "13 EMA pop" : bearFlagSig ? "bear flag break" : pmlBreakSig ? "PML break confirmed" : retestPdlSig ? "PDL retest failed" : pdlResSig ? "PDL held as resistance" : revConfBear ? "reversal confirmed down" : "confluence"
+
+var int    lastBuyBar  = na
+var string lastBuyTxt  = na
+var int    lastSellBar = na
+var string lastSellTxt = na
+if newDay
+    lastBuyBar  := na
+    lastBuyTxt  := na
+    lastSellBar := na
+    lastSellTxt := na
+if buySig
+    lastBuyBar := bar_index
+    lastBuyTxt := buyReason
+if sellSig
+    lastSellBar := bar_index
+    lastSellTxt := sellReason
 
 // ─── Bias score ──────────────────────────────────────────────────────────────
 bullPts = (close > pdh ? 1 : 0) + (not na(pmHigh) and close > pmHigh ? 1 : 0) + (bullFan ? 1 : 0) + (above200 ? 1 : 0)
@@ -291,12 +288,6 @@ biasCol = switch
 bsFlagUp     = ta.barssince(bullFlagSig)
 flagRecentUp = not na(bsFlagUp) and bsFlagUp <= 30
 
-// ─── Visual layer: regime bars, momentum ribbon, bias tint ───────────────────
-// Gray = stand down (chop/bunched). Solid teal/red = momentum. Faded = trend
-// without spread. Priority: chop beats everything.
-barCol = visualChop ? #787b86 : momoUp ? #089981 : momoDn ? #f23645 : trendUp ? color.new(#089981, 55) : trendDn ? color.new(#f23645, 55) : na
-barcolor(showBarCol ? barCol : na, title="Regime bars")
-
 // ─── Plots: EMAs, levels, zones ──────────────────────────────────────────────
 // 13/48 drop to width 1 and fade when bunched — the ribbon carries the weight.
 // The 200 stays width 2: it's a level, not a momentum line.
@@ -309,8 +300,6 @@ spreadRatio = atrVal > 0 ? math.abs(ema13 - ema48) / atrVal : 0.0
 dirCol = ema13 >= ema48 ? #089981 : #f23645
 ribCol = color.from_gradient(spreadRatio, 0.0, math.max(spreadMult, 0.1) * 2, color.new(dirCol, 96), color.new(dirCol, 72))
 fill(p13, p48, color=showRibbon ? ribCol : na, title="13/48 momentum ribbon")
-
-bgcolor(showBiasBg ? (bullPts >= 3 ? color.new(#089981, 94) : bearPts >= 3 ? color.new(#f23645, 94) : na) : na, title="Bias tint")
 
 // Break the PDH/PDL lines on the bar where the level rolls (linebr breaks on
 // na) — otherwise the plot draws vertical connectors between days' levels,
@@ -332,38 +321,6 @@ pmShow  = showPM and not newDay
 pmhPlot = plot(pmShow ? pmHigh : na, "Pre-market high", colPM, 1, plot.style_linebr)
 pmlPlot = plot(pmShow ? pmLow  : na, "Pre-market low",  colPM, 1, plot.style_linebr)
 fill(pmhPlot, pmlPlot, color=showPM and inChop ? color.new(colPM, 92) : na, title="PMH–PML chop range")
-
-// ─── Signal shapes ───────────────────────────────────────────────────────────
-// Minimal mode: one BUY and one SELL marker, nothing else
-plotshape(minimal and buySig,  "BUY",  shape.labelup,   location.belowbar, color=color.new(#089981, 0), text="BUY",  textcolor=color.white, size=size.tiny)
-plotshape(minimal and sellSig, "SELL", shape.labeldown, location.abovebar, color=color.new(#f23645, 0), text="SELL", textcolor=color.white, size=size.tiny)
-
-// Detailed mode: the individual setup tags
-det = not minimal
-plotshape(det and showDips and dip13First, "13 EMA first dip",  shape.triangleup,   location.belowbar, color=col13, text="DIP", textcolor=col13, size=size.tiny)
-plotshape(det and showDips and dip13ReAdd, "13 EMA re-add dip", shape.triangleup,   location.belowbar, color=col13, text="ADD", textcolor=col13, size=size.tiny)
-plotshape(det and showDips and dip13Later, "13 EMA later dip",  shape.triangleup,   location.belowbar, color=color.new(#f5d33a, 40), size=size.tiny)
-plotshape(det and showDips and dip48Sig,   "48 EMA dip",        shape.triangleup,   location.belowbar, color=col48, text="48",  textcolor=col48, size=size.tiny)
-plotshape(det and showDips and pop13Sig,   "13 EMA pop",        shape.triangledown, location.abovebar, color=col13, text="POP", textcolor=col13, size=size.tiny)
-
-plotshape(det and showFlags and bullFlagSig, "Bull flag break", shape.flag, location.belowbar, color=color.new(#089981, 0), size=size.tiny)
-plotshape(det and showFlags and bearFlagSig, "Bear flag break", shape.flag, location.abovebar, color=color.new(#f23645, 0), size=size.tiny)
-
-// Cross X markers (detailed mode only — the regime bar coloring carries the
-// cross/trend information in minimal mode)
-plotshape(det and showCross and crossBullSig, "Bullish 13/48 cross", shape.xcross, location.belowbar, color=color.new(#089981, 0), size=size.tiny)
-plotshape(det and showCross and crossBearSig, "Bearish 13/48 cross", shape.xcross, location.abovebar, color=color.new(#f23645, 0), size=size.tiny)
-plotshape(det and showCross and revConfBull, "Reversal confirmed up",   shape.labelup,   location.belowbar, color=color.new(#089981, 0), text="REV", textcolor=color.white, size=size.tiny)
-plotshape(det and showCross and revConfBear, "Reversal confirmed down", shape.labeldown, location.abovebar, color=color.new(#f23645, 0), text="REV", textcolor=color.white, size=size.tiny)
-
-plotshape(det and showLevels and rejectPdhSig, "PDH rejection",          shape.triangledown, location.abovebar, color=color.new(#f23645, 0), text="REJ", textcolor=color.new(#f23645, 0), size=size.tiny)
-plotshape(det and showLevels and retestPdhSig, "PDH break&retest hold",  shape.triangleup,   location.belowbar, color=color.new(#089981, 0), text="B&R", textcolor=color.new(#089981, 0), size=size.tiny)
-plotshape(det and showLevels and bouncePdlSig, "PDL bounce",             shape.triangleup,   location.belowbar, color=color.new(#089981, 0), text="BNC", textcolor=color.new(#089981, 0), size=size.tiny)
-plotshape(det and showLevels and retestPdlSig, "PDL break&retest fail",  shape.triangledown, location.abovebar, color=color.new(#f23645, 0), text="B&R", textcolor=color.new(#f23645, 0), size=size.tiny)
-plotshape(det and showLevels and pdhSupSig,    "PDH support hold",       shape.triangleup,   location.belowbar, color=color.new(#089981, 0), text="SUP", textcolor=color.new(#089981, 0), size=size.tiny)
-plotshape(det and showLevels and pdlResSig,    "PDL resistance fail",    shape.triangledown, location.abovebar, color=color.new(#f23645, 0), text="RES", textcolor=color.new(#f23645, 0), size=size.tiny)
-plotshape(det and showLevels and pmhBreakSig,  "PMH resistance break",   shape.triangleup,   location.belowbar, color=colPM, text="BRK", textcolor=color.new(#089981, 0), size=size.tiny)
-plotshape(det and showLevels and pmlBreakSig,  "PML support break",      shape.triangledown, location.abovebar, color=colPM, text="BRK", textcolor=color.new(#f23645, 0), size=size.tiny)
 
 // ─── Level name labels (right edge) ──────────────────────────────────────────
 var label pdhLbl = na
@@ -401,7 +358,7 @@ var table biasTbl = na
 if showTable and barstate.islast
     bool firstBuild = na(biasTbl)
     if firstBuild
-        biasTbl := table.new(tblPos, 2, 9, bgcolor=color.new(#131722, 15), frame_width=1, frame_color=color.new(#363a45, 0), border_width=1, border_color=color.new(#363a45, 0))
+        biasTbl := table.new(tblPos, 2, 12, bgcolor=color.new(#131722, 15), frame_width=1, frame_color=color.new(#363a45, 0), border_width=1, border_color=color.new(#363a45, 0))
     txtCol = color.new(#d1d4dc, 0)
     table.cell(biasTbl, 0, 0, "BIAS CHECKLIST", text_color=color.white, text_size=size.small, bgcolor=color.new(#2962ff, 40))
     pdhRowTxt = openAbovePdh ? "Above PDH — main support" : "Above prev day high"
@@ -420,18 +377,27 @@ if showTable and barstate.islast
     table.cell(biasTbl, 0, 7, biasTxt, text_color=biasCol, text_size=size.small)
     guideTxt = inChop ? "Chop: inside PMH–PML — be patient" : bunched ? "EMAs bunched — no momentum yet" : close > ema13 and close > ema48 ? "No shorts above the 13/48" : close < ema13 and close < ema48 ? "No longs below the 13/48" : "Mixed — wait for structure"
     table.cell(biasTbl, 0, 8, guideTxt, text_color=color.new(#b2b5be, 0), text_size=size.tiny)
+    // Signals section: the day's latest setup per side, with age. Row lights
+    // up when the signal fired on the current bar.
+    table.cell(biasTbl, 0, 9, "SIGNALS TODAY", text_color=color.white, text_size=size.small, bgcolor=color.new(#2962ff, 40))
+    buyAgo  = na(lastBuyBar)  ? na : bar_index - lastBuyBar
+    sellAgo = na(lastSellBar) ? na : bar_index - lastSellBar
+    buyRowTxt  = na(lastBuyBar)  ? "BUY: —" : "BUY: " + lastBuyTxt + (buyAgo == 0 ? " · NOW" : " · " + str.tostring(buyAgo * timeframe.in_seconds() / 60, "#") + "m ago")
+    sellRowTxt = na(lastSellBar) ? "SELL: —" : "SELL: " + lastSellTxt + (sellAgo == 0 ? " · NOW" : " · " + str.tostring(sellAgo * timeframe.in_seconds() / 60, "#") + "m ago")
+    table.cell(biasTbl, 0, 10, buyRowTxt,  text_color=color.new(#089981, 0), text_size=size.tiny, text_halign=text.align_left, bgcolor=buyAgo == 0 ? color.new(#089981, 75) : na)
+    table.cell(biasTbl, 0, 11, sellRowTxt, text_color=color.new(#f23645, 0), text_size=size.tiny, text_halign=text.align_left, bgcolor=sellAgo == 0 ? color.new(#f23645, 75) : na)
     if firstBuild
         table.merge_cells(biasTbl, 0, 0, 1, 0)
         table.merge_cells(biasTbl, 0, 7, 1, 7)
         table.merge_cells(biasTbl, 0, 8, 1, 8)
+        table.merge_cells(biasTbl, 0, 9, 1, 9)
+        table.merge_cells(biasTbl, 0, 10, 1, 10)
+        table.merge_cells(biasTbl, 0, 11, 1, 11)
 
 // ─── Alerts: two signals, that's it ──────────────────────────────────────────
 // The alert message names the setup that fired. One TradingView alert with
 // condition "Any alert() function call" covers both, or use the BUY / SELL
 // alertconditions individually.
-buyReason  = dip13Sig ? "13 EMA dip" : dip48Sig ? "48 EMA dip" : bullFlagSig ? "bull flag break" : pmhBreakSig ? "PMH break confirmed" : retestPdhSig ? "PDH break & retest held" : pdhSupSig ? "PDH held as support" : revConfBull ? "reversal confirmed up" : "confluence"
-sellReason = pop13Sig ? "13 EMA pop" : bearFlagSig ? "bear flag break" : pmlBreakSig ? "PML break confirmed" : retestPdlSig ? "PDL retest failed" : pdlResSig ? "PDL held as resistance" : revConfBear ? "reversal confirmed down" : "confluence"
-
 if alertsOn
     if buySig
         alert(syminfo.ticker + ": BUY — " + buyReason, alert.freq_once_per_bar)

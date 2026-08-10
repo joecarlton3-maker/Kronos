@@ -47,6 +47,13 @@ above 200 EMA) plus a bull-flaggy price-action row, and prints a verdict from
 2. **Reject at the PDH** → bearish (`PDH REJ`)
 3. **Bounce at the PDL** → bullish (`PDL BNC`)
 4. **Break & retest PDL fails** → bearish (`PDL B&R`)
+5. **Opened above the PDH** → PDH flips to the day's main support; a dip into
+   the zone that holds fires `PDH SUP` (bullish). The checklist row renames
+   itself to "Above PDH — main support" on those days. Mirrored: opened below
+   the PDL → `PDL RES` (bearish).
+6. **Pre-market level breaks** (one-shot per day, RTH only): first close
+   through the PMH → `PMH BRK` (calls trigger); first close through the PML →
+   `PML BRK` (puts trigger).
 
 **Trend continuation** (only while the fan and 200 EMA agree):
 

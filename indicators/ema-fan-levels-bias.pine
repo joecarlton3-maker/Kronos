@@ -39,6 +39,8 @@ coolBars   = input.int(6, "Min bars between level signals", minval=0, group=grpS
 chopFilter = input.bool(true, "Mute trend entries inside PMH–PML chop range", group=grpS, tooltip="Avoid trading anything between the pre-market high and low. While price is inside that range, EMA dip, flag, and 13/48 cross signals are muted. Level plays and PMH/PML breaks still fire.")
 rthOnly    = input.bool(true, "Signals during regular hours only", group=grpS, tooltip="Suppress all signals outside the cash session. Levels and EMAs still draw on extended-hours bars.")
 sigWindow  = input.session("0945-1600", "Signal window (New York time)", group=grpS, tooltip="No trades until 9:45 — the opening 15 minutes are skipped. All signals only fire inside this window.")
+htfConfirm = input.bool(true, "Confirm PMH/PML breaks on HTF close", group=grpS, inline="htf", tooltip="'Confirm the break & ride the trend' — a pre-market level break only signals once a higher-timeframe candle CLOSES through the level. A wick through it is not a break. Uses only completed HTF bars, so it never repaints; the signal arrives when the HTF candle closes.")
+confTF     = input.timeframe("15", "", group=grpS, inline="htf")
 crossGap   = input.int(10, "13/48 cross whipsaw filter (min bars)", minval=0, group=grpS, tooltip="A 13/48 cross only signals if the previous cross was at least this many bars ago. Kills the braided-EMA spam on rangebound days.")
 spreadMult = input.float(0.5, "Min 13/48 spread for momentum (ATR mult)", minval=0.0, step=0.1, group=grpS, tooltip="Bunched-up EMAs = no momentum = chop. Dip and flag entries only fire once the 13/48 EMA separation exceeds this many ATRs — the 'fan out' that shows momentum is present. Set to 0 to disable.")
 
@@ -167,13 +169,22 @@ if bouncePdlSig or pdhSupSig
 crossUpPmh = ta.crossover(close, pmHigh)
 crossDnPml = ta.crossunder(close, pmLow)
 
+// "Confirm the break & ride the trend": a 15m wick through the level is not a
+// break — only a completed 15m close through it confirms. [1] = last CLOSED
+// HTF bar → non-repainting; the signal lands when that HTF candle closes.
+htfClose    = request.security(syminfo.tickerid, confTF, close[1], lookahead=barmerge.lookahead_off)
+htfAbovePmh = htfClose > pmHigh
+htfBelowPml = htfClose < pmLow
+brkUpTrig   = htfConfirm ? htfAbovePmh and not htfAbovePmh[1] : crossUpPmh
+brkDnTrig   = htfConfirm ? htfBelowPml and not htfBelowPml[1] : crossDnPml
+
 var bool pmhBroken = false
 var bool pmlBroken = false
 if newDay
     pmhBroken := false
     pmlBroken := false
-pmhBreakSig = not pmhBroken and crossUpPmh and session.ismarket and inWindow and barstate.isconfirmed
-pmlBreakSig = not pmlBroken and crossDnPml and session.ismarket and inWindow and barstate.isconfirmed
+pmhBreakSig = not pmhBroken and brkUpTrig and session.ismarket and inWindow and barstate.isconfirmed
+pmlBreakSig = not pmlBroken and brkDnTrig and session.ismarket and inWindow and barstate.isconfirmed
 if pmhBreakSig
     pmhBroken := true
 if pmlBreakSig

@@ -54,10 +54,12 @@ above 200 EMA) plus a bull-flaggy price-action row, and prints a verdict from
    the zone that holds fires `PDH SUP` (bullish). The checklist row renames
    itself to "Above PDH — main support" on those days. Mirrored: opened below
    the PDL → `PDL RES` (bearish).
-6. **Pre-market level breaks** (one-shot per day, RTH only): first close
-   through the PMH → `PMH BRK` (calls trigger); first close through the PML →
-   `PML BRK` (puts trigger). Breaks require a **close** through the level —
-   a wick through it is not a break.
+6. **Pre-market level breaks** (one-shot per day, RTH only): first confirmed
+   break of the PMH → `PMH BRK` (calls trigger); first confirmed break of the
+   PML → `PML BRK` (puts trigger). "Confirm the break & ride the trend": by
+   default a break only signals once a **15-minute candle closes** through the
+   level — a wick through it is not a break. The confirmation timeframe is
+   configurable, or can be switched off to signal on chart-timeframe closes.
 7. **PMH–PML chop filter**: "avoid trading anything between those 2 levels."
    While price sits inside the pre-market range, EMA dip and flag entry
    signals are muted (toggleable), the range is shaded, and the table footer

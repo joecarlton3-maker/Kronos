@@ -1,0 +1,287 @@
+//@version=6
+indicator("13/48/200 EMA Fan + Key Levels Bias System", shorttitle="EMA Fan Bias", overlay=true, max_labels_count=100)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Intraday bias + signal system:
+//   • 13 / 48 / 200 EMA fan (trend + "who's in control")
+//   • Previous Day High/Low zones, Pre-Market High/Low levels
+//   • The 4 level plays: PDH break&retest (bull), PDH reject (bear),
+//     PDL bounce (bull), PDL break&retest (bear)
+//   • 13/48 EMA dip entries with first-dip / re-add tracking
+//   • Micro bull/bear flag breaks
+//   • 13x48 EMA cross reversal confirmation
+//   • Bullish bias checklist table
+// Best on 2m–15m charts with extended hours ON (needed for pre-market levels).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── Inputs ──────────────────────────────────────────────────────────────────
+grpE   = "EMA Fan"
+len13  = input.int(13,  "Fast EMA",  minval=1, group=grpE)
+len48  = input.int(48,  "Mid EMA",   minval=1, group=grpE)
+len200 = input.int(200, "Slow EMA",  minval=1, group=grpE)
+col13  = input.color(#f5d33a, "Fast", group=grpE, inline="cols")
+col48  = input.color(#9c27b0, "Mid",  group=grpE, inline="cols")
+col200 = input.color(#f23645, "Slow", group=grpE, inline="cols")
+
+grpL    = "Key Levels"
+showPD  = input.bool(true, "Previous day high / low zones", group=grpL)
+showPM  = input.bool(true, "Pre-market high / low", group=grpL)
+zonePct = input.float(0.05, "Zone half-width (% of level)", minval=0.0, step=0.01, group=grpL, tooltip="PDH/PDL are treated as zones, not exact lines. 0.05% on a $600 underlying gives a ~$0.60 wide zone.")
+colPD   = input.color(#2962ff, "PDH / PDL", group=grpL, inline="lvlc")
+colPM   = input.color(#787b86, "PMH / PML", group=grpL, inline="lvlc")
+
+grpS       = "Signals"
+showDips   = input.bool(true, "EMA pullback (dip) signals", group=grpS)
+showFlags  = input.bool(true, "Micro flag break signals", group=grpS)
+showCross  = input.bool(true, "13/48 EMA cross + reversal confirmation", group=grpS)
+showLevels = input.bool(true, "PDH / PDL reject, bounce, break & retest", group=grpS)
+coolBars   = input.int(6, "Min bars between level signals", minval=0, group=grpS, tooltip="Cooldown so a choppy fight at a level doesn't spam signals.")
+
+grpT      = "Table & Background"
+showTable = input.bool(true, "Bias checklist table", group=grpT)
+tblPosStr = input.string("Top right", "Table position", options=["Top right", "Top left", "Bottom right", "Bottom left"], group=grpT)
+showBg    = input.bool(true, "Full-control background tint", group=grpT)
+
+// ─── EMA fan ─────────────────────────────────────────────────────────────────
+ema13  = ta.ema(close, len13)
+ema48  = ta.ema(close, len48)
+ema200 = ta.ema(close, len200)
+
+bullFan  = ema13 > ema48 and ema48 > ema200
+bearFan  = ema13 < ema48 and ema48 < ema200
+above200 = close > ema200
+aboveAll = close > ema13 and close > ema48 and close > ema200
+belowAll = close < ema13 and close < ema48 and close < ema200
+trendUp  = bullFan and above200
+trendDn  = bearFan and not above200
+
+// ─── Key levels ──────────────────────────────────────────────────────────────
+// [1] offset = previous fully closed daily bar → non-repainting
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead=barmerge.lookahead_off)
+
+newDay = timeframe.change("D")
+
+var float pmHigh = na
+var float pmLow  = na
+if newDay
+    pmHigh := na
+    pmLow  := na
+if session.ispremarket
+    pmHigh := na(pmHigh) ? high : math.max(pmHigh, high)
+    pmLow  := na(pmLow)  ? low  : math.min(pmLow, low)
+
+zoneWH = pdh * zonePct / 100
+zoneWL = pdl * zonePct / 100
+
+// ─── Level break state (for break & retest vs. first-touch plays) ────────────
+crossUpPdh = ta.crossover(close, pdh)
+crossDnPdl = ta.crossunder(close, pdl)
+
+var bool brokePdhUp = false
+var bool brokePdlDn = false
+if newDay
+    brokePdhUp := false
+    brokePdlDn := false
+if crossUpPdh
+    brokePdhUp := true
+if crossDnPdl
+    brokePdlDn := true
+// Losing the level entirely invalidates the breakout state
+if brokePdhUp and close < pdh - zoneWH
+    brokePdhUp := false
+if brokePdlDn and close > pdl + zoneWL
+    brokePdlDn := false
+
+// ─── The 4 level plays ───────────────────────────────────────────────────────
+var int lastLvlBar = na
+canLvl = na(lastLvlBar) or bar_index - lastLvlBar >= coolBars
+
+// 1) Reject at PDH = bearish: tags the zone from below, closes red under the level
+rejectPdhSig = not brokePdhUp and close[1] < pdh and high >= pdh - zoneWH and close < pdh and close < open and canLvl and barstate.isconfirmed
+// 2) Break & retest PDH holds = bullish: broke above, dips back into the zone, holds
+retestPdhSig = brokePdhUp and low <= pdh + zoneWH and low[1] > pdh + zoneWH and close > pdh and canLvl and barstate.isconfirmed
+// 3) Bounce at PDL = bullish: tags the zone from above, closes green over the level
+bouncePdlSig = not brokePdlDn and close[1] > pdl and low <= pdl + zoneWL and close > pdl and close > open and canLvl and barstate.isconfirmed
+// 4) Break & retest PDL fails = bearish: broke below, pops back into the zone, rejects
+retestPdlSig = brokePdlDn and high >= pdl - zoneWL and high[1] < pdl - zoneWL and close < pdl and canLvl and barstate.isconfirmed
+
+var int lastRejBar = na
+var int lastBncBar = na
+if rejectPdhSig or retestPdhSig or bouncePdlSig or retestPdlSig
+    lastLvlBar := bar_index
+if rejectPdhSig
+    lastRejBar := bar_index
+if bouncePdlSig
+    lastBncBar := bar_index
+
+// ─── EMA dip / pop signals ───────────────────────────────────────────────────
+touch13  = low <= ema13 and low[1] > ema13[1]
+touch48  = low <= ema48 and low[1] > ema48[1]
+dip13Sig = trendUp and touch13 and close > ema13 and barstate.isconfirmed
+dip48Sig = trendUp and touch48 and close > ema48 and barstate.isconfirmed
+pop13Sig = trendDn and high >= ema13 and high[1] < ema13[1] and close < ema13 and barstate.isconfirmed
+
+crossBull    = ta.crossover(ema13, ema48)
+crossBear    = ta.crossunder(ema13, ema48)
+crossBullSig = crossBull and barstate.isconfirmed
+crossBearSig = crossBear and barstate.isconfirmed
+
+// First dip vs. re-add tracking: count resets when the leg breaks (close under 48)
+legEndBull = ta.crossunder(close, ema48)
+
+var int dipCount = 0
+if legEndBull or crossBear
+    dipCount := 0
+if dip13Sig
+    dipCount += 1
+dip13First = dip13Sig and dipCount == 1
+dip13ReAdd = dip13Sig and dipCount == 2
+dip13Later = dip13Sig and dipCount > 2
+
+// ─── Micro flag breaks ───────────────────────────────────────────────────────
+// Two lower-high pullback bars holding the fan, then a close through the prior high
+bullFlagSig = trendUp and close > ema13 and low > ema48 and close > high[1] and high[1] < high[2] and high[2] < high[3] and barstate.isconfirmed
+bearFlagSig = trendDn and close < ema13 and high < ema48 and close < low[1] and low[1] > low[2] and low[2] > low[3] and barstate.isconfirmed
+
+// ─── Reversal confirmation: level play + EMA cross agree ─────────────────────
+revConfBear = crossBearSig and not na(lastRejBar) and bar_index - lastRejBar <= 20
+revConfBull = crossBullSig and not na(lastBncBar) and bar_index - lastBncBar <= 20
+
+// ─── Bias score ──────────────────────────────────────────────────────────────
+bullPts = (close > pdh ? 1 : 0) + (not na(pmHigh) and close > pmHigh ? 1 : 0) + (bullFan ? 1 : 0) + (above200 ? 1 : 0)
+bearPts = (close < pdl ? 1 : 0) + (not na(pmLow) and close < pmLow ? 1 : 0) + (bearFan ? 1 : 0) + (not above200 ? 1 : 0)
+
+biasTxt = switch
+    bullPts == 4 => "FULL BULL — CALLS ONLY"
+    bullPts == 3 => "BULLISH"
+    bearPts == 4 => "FULL BEAR — PUTS ONLY"
+    bearPts == 3 => "BEARISH"
+    above200     => "LEAN BULLISH"
+    => "LEAN BEARISH"
+
+biasCol = switch
+    bullPts >= 3 => color.new(#089981, 0)
+    bearPts >= 3 => color.new(#f23645, 0)
+    above200     => color.new(#4caf50, 0)
+    => color.new(#ef5350, 0)
+
+aboveAllFlipUp = aboveAll and not aboveAll[1] and barstate.isconfirmed
+belowAllFlipDn = belowAll and not belowAll[1] and barstate.isconfirmed
+
+bsFlagUp     = ta.barssince(bullFlagSig)
+flagRecentUp = not na(bsFlagUp) and bsFlagUp <= 30
+
+// ─── Plots: EMAs, levels, zones ──────────────────────────────────────────────
+plot(ema13,  "13 EMA",  col13,  2)
+plot(ema48,  "48 EMA",  col48,  2)
+plot(ema200, "200 EMA", col200, 2)
+
+hidden = color.new(color.blue, 100)
+plot(showPD ? pdh : na, "PDH", colPD, 2, plot.style_linebr)
+plot(showPD ? pdl : na, "PDL", colPD, 2, plot.style_linebr)
+pdhTop = plot(showPD ? pdh + zoneWH : na, "PDH zone top",    hidden, editable=false)
+pdhBot = plot(showPD ? pdh - zoneWH : na, "PDH zone bottom", hidden, editable=false)
+pdlTop = plot(showPD ? pdl + zoneWL : na, "PDL zone top",    hidden, editable=false)
+pdlBot = plot(showPD ? pdl - zoneWL : na, "PDL zone bottom", hidden, editable=false)
+fill(pdhTop, pdhBot, color=color.new(colPD, 85), title="PDH zone")
+fill(pdlTop, pdlBot, color=color.new(colPD, 85), title="PDL zone")
+
+plot(showPM ? pmHigh : na, "Pre-market high", colPM, 1, plot.style_circles)
+plot(showPM ? pmLow  : na, "Pre-market low",  colPM, 1, plot.style_circles)
+
+bgcolor(showBg and aboveAll ? color.new(#089981, 94) : showBg and belowAll ? color.new(#f23645, 94) : na, title="Full-control tint")
+
+// ─── Signal shapes ───────────────────────────────────────────────────────────
+plotshape(showDips and dip13First, "13 EMA first dip",  shape.triangleup,   location.belowbar, color=col13, text="13 DIP",  textcolor=col13, size=size.tiny)
+plotshape(showDips and dip13ReAdd, "13 EMA re-add dip", shape.triangleup,   location.belowbar, color=col13, text="RE-ADD",  textcolor=col13, size=size.tiny)
+plotshape(showDips and dip13Later, "13 EMA later dip",  shape.triangleup,   location.belowbar, color=color.new(#f5d33a, 40), size=size.tiny)
+plotshape(showDips and dip48Sig,   "48 EMA dip",        shape.triangleup,   location.belowbar, color=col48, text="48 DIP",  textcolor=col48, size=size.tiny)
+plotshape(showDips and pop13Sig,   "13 EMA pop",        shape.triangledown, location.abovebar, color=col13, text="13 POP",  textcolor=col13, size=size.tiny)
+
+plotshape(showFlags and bullFlagSig, "Bull flag break", shape.flag, location.belowbar, color=color.new(#089981, 0), text="FLAG", textcolor=color.new(#089981, 0), size=size.tiny)
+plotshape(showFlags and bearFlagSig, "Bear flag break", shape.flag, location.abovebar, color=color.new(#f23645, 0), text="FLAG", textcolor=color.new(#f23645, 0), size=size.tiny)
+
+plotshape(showCross and crossBullSig, "Bullish 13/48 cross", shape.xcross, location.belowbar, color=color.new(#089981, 0), text="13x48", textcolor=color.new(#089981, 0), size=size.tiny)
+plotshape(showCross and crossBearSig, "Bearish 13/48 cross", shape.xcross, location.abovebar, color=color.new(#f23645, 0), text="13x48", textcolor=color.new(#f23645, 0), size=size.tiny)
+plotshape(showCross and revConfBull, "Reversal confirmed up",   shape.labelup,   location.belowbar, color=color.new(#089981, 0), text="REV", textcolor=color.white, size=size.tiny)
+plotshape(showCross and revConfBear, "Reversal confirmed down", shape.labeldown, location.abovebar, color=color.new(#f23645, 0), text="REV", textcolor=color.white, size=size.tiny)
+
+plotshape(showLevels and rejectPdhSig, "PDH rejection",          shape.triangledown, location.abovebar, color=color.new(#f23645, 0), text="PDH REJ", textcolor=color.new(#f23645, 0), size=size.tiny)
+plotshape(showLevels and retestPdhSig, "PDH break&retest hold",  shape.triangleup,   location.belowbar, color=color.new(#089981, 0), text="PDH B&R", textcolor=color.new(#089981, 0), size=size.tiny)
+plotshape(showLevels and bouncePdlSig, "PDL bounce",             shape.triangleup,   location.belowbar, color=color.new(#089981, 0), text="PDL BNC", textcolor=color.new(#089981, 0), size=size.tiny)
+plotshape(showLevels and retestPdlSig, "PDL break&retest fail",  shape.triangledown, location.abovebar, color=color.new(#f23645, 0), text="PDL B&R", textcolor=color.new(#f23645, 0), size=size.tiny)
+
+// ─── Level name labels (right edge) ──────────────────────────────────────────
+var label pdhLbl = na
+var label pdlLbl = na
+var label pmhLbl = na
+var label pmlLbl = na
+if barstate.islast
+    if showPD and na(pdhLbl)
+        pdhLbl := label.new(bar_index, pdh, "PDH", style=label.style_label_left, color=color.new(colPD, 100), textcolor=colPD, size=size.small)
+    if showPD and na(pdlLbl)
+        pdlLbl := label.new(bar_index, pdl, "PDL", style=label.style_label_left, color=color.new(colPD, 100), textcolor=colPD, size=size.small)
+    if showPM and na(pmhLbl) and not na(pmHigh)
+        pmhLbl := label.new(bar_index, pmHigh, "PMH", style=label.style_label_left, color=color.new(colPM, 100), textcolor=colPM, size=size.small)
+    if showPM and na(pmlLbl) and not na(pmLow)
+        pmlLbl := label.new(bar_index, pmLow, "PML", style=label.style_label_left, color=color.new(colPM, 100), textcolor=colPM, size=size.small)
+    if not na(pdhLbl)
+        label.set_xy(pdhLbl, bar_index + 2, pdh)
+    if not na(pdlLbl)
+        label.set_xy(pdlLbl, bar_index + 2, pdl)
+    if not na(pmhLbl)
+        label.set_xy(pmhLbl, bar_index + 2, pmHigh)
+    if not na(pmlLbl)
+        label.set_xy(pmlLbl, bar_index + 2, pmLow)
+
+// ─── Bias checklist table ────────────────────────────────────────────────────
+chk(ok) => ok ? "✅" : "❌"
+
+tblPos = switch tblPosStr
+    "Top right"    => position.top_right
+    "Top left"     => position.top_left
+    "Bottom right" => position.bottom_right
+    => position.bottom_left
+
+var table biasTbl = na
+if showTable and barstate.islast
+    bool firstBuild = na(biasTbl)
+    if firstBuild
+        biasTbl := table.new(tblPos, 2, 8, bgcolor=color.new(#131722, 15), frame_width=1, frame_color=color.new(#363a45, 0), border_width=1, border_color=color.new(#363a45, 0))
+    txtCol = color.new(#d1d4dc, 0)
+    table.cell(biasTbl, 0, 0, "BIAS CHECKLIST", text_color=color.white, text_size=size.small, bgcolor=color.new(#2962ff, 40))
+    table.cell(biasTbl, 0, 1, "Above prev day high",   text_color=txtCol, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(biasTbl, 1, 1, chk(close > pdh), text_size=size.tiny)
+    table.cell(biasTbl, 0, 2, "Above pre-market high", text_color=txtCol, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(biasTbl, 1, 2, na(pmHigh) ? "—" : chk(close > pmHigh), text_color=txtCol, text_size=size.tiny)
+    table.cell(biasTbl, 0, 3, "Bullish EMA fan (13>48>200)", text_color=txtCol, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(biasTbl, 1, 3, chk(bullFan), text_size=size.tiny)
+    table.cell(biasTbl, 0, 4, "Above 200 EMA",         text_color=txtCol, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(biasTbl, 1, 4, chk(above200), text_size=size.tiny)
+    table.cell(biasTbl, 0, 5, "Bull-flaggy price action", text_color=txtCol, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(biasTbl, 1, 5, chk(flagRecentUp), text_size=size.tiny)
+    table.cell(biasTbl, 0, 6, biasTxt, text_color=biasCol, text_size=size.small)
+    guideTxt = close > ema13 and close > ema48 ? "No shorts above the 13/48" : close < ema13 and close < ema48 ? "No longs below the 13/48" : "Mixed — wait for structure"
+    table.cell(biasTbl, 0, 7, guideTxt, text_color=color.new(#b2b5be, 0), text_size=size.tiny)
+    if firstBuild
+        table.merge_cells(biasTbl, 0, 0, 1, 0)
+        table.merge_cells(biasTbl, 0, 6, 1, 6)
+        table.merge_cells(biasTbl, 0, 7, 1, 7)
+
+// ─── Alerts ──────────────────────────────────────────────────────────────────
+alertcondition(dip13First,     "Bullish: first 13 EMA dip",           "First 13 EMA dip of the leg — trend entry zone")
+alertcondition(dip13ReAdd,     "Bullish: second 13 EMA dip (re-add)", "Second 13 EMA dip — re-add spot if it holds")
+alertcondition(dip48Sig,       "Bullish: 48 EMA dip",                 "Deeper pullback into the 48 EMA holding trend")
+alertcondition(pop13Sig,       "Bearish: 13 EMA pop",                 "Rally into the 13 EMA in a downtrend — short-the-pop zone")
+alertcondition(bullFlagSig,    "Bull flag micro-break",               "Pullback held the fan and broke the prior high")
+alertcondition(bearFlagSig,    "Bear flag micro-break",               "Pop failed at the fan and broke the prior low")
+alertcondition(crossBullSig,   "Bullish 13/48 EMA cross",             "13 EMA crossed above the 48 EMA")
+alertcondition(crossBearSig,   "Bearish 13/48 EMA cross",             "13 EMA crossed below the 48 EMA — short-term trend shift")
+alertcondition(rejectPdhSig,   "PDH rejection",                       "Rejected at the previous day high zone — bearish")
+alertcondition(retestPdhSig,   "PDH break & retest hold",             "Broke PDH and the retest held — bullish")
+alertcondition(bouncePdlSig,   "PDL bounce",                          "Bounced off the previous day low zone — bullish")
+alertcondition(retestPdlSig,   "PDL break & retest fail",             "Broke PDL and the retest failed — bearish")
+alertcondition(revConfBull,    "Reversal confirmed up",               "PDL bounce + bullish 13/48 cross — reversal confirmation")
+alertcondition(revConfBear,    "Reversal confirmed down",             "PDH reject + bearish 13/48 cross — reversal confirmation")
+alertcondition(aboveAllFlipUp, "Bulls take full control",             "Price reclaimed all three EMAs — calls only regime")
+alertcondition(belowAllFlipDn, "Bears take full control",             "Price lost all three EMAs — puts only regime")

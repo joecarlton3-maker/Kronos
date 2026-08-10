@@ -316,8 +316,10 @@ plotshape(det and showDips and pop13Sig,   "13 EMA pop",        shape.triangledo
 plotshape(det and showFlags and bullFlagSig, "Bull flag break", shape.flag, location.belowbar, color=color.new(#089981, 0), size=size.tiny)
 plotshape(det and showFlags and bearFlagSig, "Bear flag break", shape.flag, location.abovebar, color=color.new(#f23645, 0), size=size.tiny)
 
-plotshape(det and showCross and crossBullSig, "Bullish 13/48 cross", shape.xcross, location.belowbar, color=color.new(#089981, 0), size=size.tiny)
-plotshape(det and showCross and crossBearSig, "Bearish 13/48 cross", shape.xcross, location.abovebar, color=color.new(#f23645, 0), size=size.tiny)
+// Cross X markers show in BOTH modes — green X below = bullish cross,
+// red X above = bearish cross (whipsaw-filtered)
+plotshape(showCross and crossBullSig, "Bullish 13/48 cross", shape.xcross, location.belowbar, color=color.new(#089981, 0), size=size.tiny)
+plotshape(showCross and crossBearSig, "Bearish 13/48 cross", shape.xcross, location.abovebar, color=color.new(#f23645, 0), size=size.tiny)
 plotshape(det and showCross and revConfBull, "Reversal confirmed up",   shape.labelup,   location.belowbar, color=color.new(#089981, 0), text="REV", textcolor=color.white, size=size.tiny)
 plotshape(det and showCross and revConfBear, "Reversal confirmed down", shape.labeldown, location.abovebar, color=color.new(#f23645, 0), text="REV", textcolor=color.white, size=size.tiny)
 

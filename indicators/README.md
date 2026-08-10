@@ -56,7 +56,14 @@ above 200 EMA) plus a bull-flaggy price-action row, and prints a verdict from
    the PDL → `PDL RES` (bearish).
 6. **Pre-market level breaks** (one-shot per day, RTH only): first close
    through the PMH → `PMH BRK` (calls trigger); first close through the PML →
-   `PML BRK` (puts trigger).
+   `PML BRK` (puts trigger). Breaks require a **close** through the level —
+   a wick through it is not a break.
+7. **PMH–PML chop filter**: "avoid trading anything between those 2 levels."
+   While price sits inside the pre-market range, EMA dip and flag entry
+   signals are muted (toggleable), the range is shaded, and the table footer
+   switches to "Chop: inside PMH–PML — be patient." Level plays, PMH/PML
+   breaks, and EMA cross / reversal signals still fire — those are the exits
+   from the chop.
 
 **Trend continuation** (only while the fan and 200 EMA agree):
 

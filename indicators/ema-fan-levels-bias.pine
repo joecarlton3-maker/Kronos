@@ -36,6 +36,7 @@ showFlags  = input.bool(true, "Micro flag break signals", group=grpS)
 showCross  = input.bool(true, "13/48 EMA cross + reversal confirmation", group=grpS)
 showLevels = input.bool(true, "PDH / PDL reject, bounce, break & retest", group=grpS)
 coolBars   = input.int(6, "Min bars between level signals", minval=0, group=grpS, tooltip="Cooldown so a choppy fight at a level doesn't spam signals.")
+chopFilter = input.bool(true, "Mute trend entries inside PMH–PML chop range", group=grpS, tooltip="Avoid trading anything between the pre-market high and low. While price is inside that range, EMA dip and flag entry signals are muted. Level plays, PMH/PML breaks, and EMA cross / reversal signals still fire.")
 
 grpA     = "Alerts"
 alertsOn = input.bool(true, "Enable alert() events", group=grpA, tooltip="Create ONE TradingView alert on this indicator with condition 'Any alert() function call' and you'll receive every signal below. Signals are gated by their display toggles — hide a signal group to also mute its alerts.")
@@ -161,12 +162,16 @@ if pmhBreakSig
 if pmlBreakSig
     pmlBroken := true
 
+// Chop range: price stuck between the pre-market high and low
+inChop   = not na(pmHigh) and not na(pmLow) and close < pmHigh and close > pmLow
+chopMute = chopFilter and inChop
+
 // ─── EMA dip / pop signals ───────────────────────────────────────────────────
 touch13  = low <= ema13 and low[1] > ema13[1]
 touch48  = low <= ema48 and low[1] > ema48[1]
-dip13Sig = trendUp and touch13 and close > ema13 and barstate.isconfirmed
-dip48Sig = trendUp and touch48 and close > ema48 and barstate.isconfirmed
-pop13Sig = trendDn and high >= ema13 and high[1] < ema13[1] and close < ema13 and barstate.isconfirmed
+dip13Sig = trendUp and touch13 and close > ema13 and not chopMute and barstate.isconfirmed
+dip48Sig = trendUp and touch48 and close > ema48 and not chopMute and barstate.isconfirmed
+pop13Sig = trendDn and high >= ema13 and high[1] < ema13[1] and close < ema13 and not chopMute and barstate.isconfirmed
 
 crossBull    = ta.crossover(ema13, ema48)
 crossBear    = ta.crossunder(ema13, ema48)
@@ -187,8 +192,8 @@ dip13Later = dip13Sig and dipCount > 2
 
 // ─── Micro flag breaks ───────────────────────────────────────────────────────
 // Two lower-high pullback bars holding the fan, then a close through the prior high
-bullFlagSig = trendUp and close > ema13 and low > ema48 and close > high[1] and high[1] < high[2] and high[2] < high[3] and barstate.isconfirmed
-bearFlagSig = trendDn and close < ema13 and high < ema48 and close < low[1] and low[1] > low[2] and low[2] > low[3] and barstate.isconfirmed
+bullFlagSig = trendUp and close > ema13 and low > ema48 and close > high[1] and high[1] < high[2] and high[2] < high[3] and not chopMute and barstate.isconfirmed
+bearFlagSig = trendDn and close < ema13 and high < ema48 and close < low[1] and low[1] > low[2] and low[2] > low[3] and not chopMute and barstate.isconfirmed
 
 // ─── Reversal confirmation: level play + EMA cross agree ─────────────────────
 revConfBear = crossBearSig and not na(lastRejBar) and bar_index - lastRejBar <= 20
@@ -233,8 +238,9 @@ pdlBot = plot(showPD ? pdl - zoneWL : na, "PDL zone bottom", hidden, editable=fa
 fill(pdhTop, pdhBot, color=color.new(colPD, 85), title="PDH zone")
 fill(pdlTop, pdlBot, color=color.new(colPD, 85), title="PDL zone")
 
-plot(showPM ? pmHigh : na, "Pre-market high", colPM, 1, plot.style_circles)
-plot(showPM ? pmLow  : na, "Pre-market low",  colPM, 1, plot.style_circles)
+pmhPlot = plot(showPM ? pmHigh : na, "Pre-market high", colPM, 1, plot.style_circles)
+pmlPlot = plot(showPM ? pmLow  : na, "Pre-market low",  colPM, 1, plot.style_circles)
+fill(pmhPlot, pmlPlot, color=showPM and inChop ? color.new(colPM, 92) : na, title="PMH–PML chop range")
 
 // ─── Signal shapes ───────────────────────────────────────────────────────────
 plotshape(showDips and dip13First, "13 EMA first dip",  shape.triangleup,   location.belowbar, color=col13, text="13 DIP",  textcolor=col13, size=size.tiny)
@@ -311,7 +317,7 @@ if showTable and barstate.islast
     table.cell(biasTbl, 0, 5, "Bull-flaggy price action", text_color=txtCol, text_size=size.tiny, text_halign=text.align_left)
     table.cell(biasTbl, 1, 5, chk(flagRecentUp), text_size=size.tiny)
     table.cell(biasTbl, 0, 6, biasTxt, text_color=biasCol, text_size=size.small)
-    guideTxt = close > ema13 and close > ema48 ? "No shorts above the 13/48" : close < ema13 and close < ema48 ? "No longs below the 13/48" : "Mixed — wait for structure"
+    guideTxt = inChop ? "Chop: inside PMH–PML — be patient" : close > ema13 and close > ema48 ? "No shorts above the 13/48" : close < ema13 and close < ema48 ? "No longs below the 13/48" : "Mixed — wait for structure"
     table.cell(biasTbl, 0, 7, guideTxt, text_color=color.new(#b2b5be, 0), text_size=size.tiny)
     if firstBuild
         table.merge_cells(biasTbl, 0, 0, 1, 0)

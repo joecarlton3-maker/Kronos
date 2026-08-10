@@ -84,14 +84,23 @@ the 13/48 separation to exceed an ATR-scaled threshold):
 - `REV` — a PDH rejection followed within 20 bars by a bearish 13/48 cross
   (or PDL bounce + bullish cross). Two confirmations, not one.
 
+## Signal styles
+
+- **Minimal (BUY / SELL)** — default. One green `BUY` and one red `SELL`
+  marker. Every setup in the engine (dips, flags, level plays, PMH/PML breaks,
+  reversal confirmations) funnels into these two, after all the discipline
+  gates (RTH only, 9:45+, chop filter, fan-spread momentum, cooldowns). The
+  family toggles choose which setups feed the composite.
+- **Detailed tags** — the individual setup markers (DIP, B&R, BRK, REV...)
+  for studying charts after hours.
+
 ## Alerts
 
-Create **one** alert: chart → Alert → Condition → this indicator → **"Any
-alert() function call"**. Every signal then arrives with a descriptive message
-prefixed by the ticker. Hiding a signal group in the settings also mutes its
-alerts, and the whole thing can be switched off with the "Enable alert()
-events" input. Signals only fire on **confirmed bar closes** and daily levels
-use the prior completed session — the indicator does not repaint.
+Two alerts total: **BUY** and **SELL**, and the message names the setup that
+fired (e.g. "QQQ: BUY — PMH break confirmed"). Create one alert with condition
+**"Any alert() function call"** to get both, or use the BUY / SELL
+alertconditions individually. Signals only fire on **confirmed bar closes**
+and levels use completed sessions — the indicator does not repaint.
 
 ## Discipline rules baked into the design
 

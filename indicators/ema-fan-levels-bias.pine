@@ -26,11 +26,13 @@ col200 = input.color(#f23645, "Slow", group=grpE, inline="cols")
 grpL    = "Key Levels"
 showPD  = input.bool(true, "Previous day high / low zones", group=grpL)
 showPM  = input.bool(true, "Pre-market high / low", group=grpL)
+pmWindow = input.session("0400-0930", "Pre-market window (New York time)", group=grpL, tooltip="PMH/PML form from 4:00am to 9:30am ET. Requires extended hours ON to have bars in this window.")
 zonePct = input.float(0.05, "Zone half-width (% of level)", minval=0.0, step=0.01, group=grpL, tooltip="PDH/PDL are treated as zones, not exact lines. 0.05% on a $600 underlying gives a ~$0.60 wide zone.")
 colPD   = input.color(#2962ff, "PDH / PDL", group=grpL, inline="lvlc")
 colPM   = input.color(#787b86, "PMH / PML", group=grpL, inline="lvlc")
 
 grpS       = "Signals"
+sigStyle   = input.string("Minimal (BUY / SELL)", "Signal style", options=["Minimal (BUY / SELL)", "Detailed tags"], group=grpS, tooltip="Minimal: one green BUY and one red SELL marker driven by the full confluence engine. Detailed: the individual tags (DIP, B&R, BRK, REV...) for studying charts.")
 showDips   = input.bool(true, "EMA pullback (dip) signals", group=grpS)
 showFlags  = input.bool(true, "Micro flag break signals", group=grpS)
 showCross  = input.bool(true, "13/48 EMA cross + reversal confirmation", group=grpS)
@@ -93,12 +95,16 @@ else if session.ismarket
     rthHigh := math.max(nz(rthHigh, high), high)
     rthLow  := math.min(nz(rthLow, low), low)
 
+// PMH/PML form from 4:00am to 9:30am ET — explicit window, not the exchange's
+// session flags, so the levels are exactly the 4:00–9:30 extremes
+inPreMkt = not na(time(timeframe.period, pmWindow, "America/New_York"))
+
 var float pmHigh = na
 var float pmLow  = na
 if newDay
     pmHigh := na
     pmLow  := na
-if session.ispremarket
+if inPreMkt
     pmHigh := na(pmHigh) ? high : math.max(pmHigh, high)
     pmLow  := na(pmLow)  ? low  : math.min(pmLow, low)
 
@@ -234,6 +240,13 @@ bearFlagSig = momoDn and close < ema13 and high < ema48 and close < low[1] and l
 revConfBear = crossBearSig and not na(lastRejBar) and bar_index - lastRejBar <= 20
 revConfBull = crossBullSig and not na(lastBncBar) and bar_index - lastBncBar <= 20
 
+// ─── Composite BUY / SELL — one green arrow, one red arrow ───────────────────
+// Every gated confluence event funnels into a single signal per direction.
+// The family toggles above choose which setups feed the composite.
+minimal = sigStyle == "Minimal (BUY / SELL)"
+buySig  = (showDips and (dip13Sig or dip48Sig)) or (showFlags and bullFlagSig) or (showLevels and (retestPdhSig or bouncePdlSig or pdhSupSig or pmhBreakSig)) or (showCross and revConfBull)
+sellSig = (showDips and pop13Sig) or (showFlags and bearFlagSig) or (showLevels and (rejectPdhSig or retestPdlSig or pdlResSig or pmlBreakSig)) or (showCross and revConfBear)
+
 // ─── Bias score ──────────────────────────────────────────────────────────────
 bullPts = (close > pdh ? 1 : 0) + (not na(pmHigh) and close > pmHigh ? 1 : 0) + (bullFan ? 1 : 0) + (above200 ? 1 : 0)
 bearPts = (close < pdl ? 1 : 0) + (not na(pmLow) and close < pmLow ? 1 : 0) + (bearFan ? 1 : 0) + (not above200 ? 1 : 0)
@@ -251,9 +264,6 @@ biasCol = switch
     bearPts >= 3 => color.new(#f23645, 0)
     above200     => color.new(#4caf50, 0)
     => color.new(#ef5350, 0)
-
-aboveAllFlipUp = aboveAll and not aboveAll[1] and sigSession and barstate.isconfirmed
-belowAllFlipDn = belowAll and not belowAll[1] and sigSession and barstate.isconfirmed
 
 bsFlagUp     = ta.barssince(bullFlagSig)
 flagRecentUp = not na(bsFlagUp) and bsFlagUp <= 30
@@ -278,28 +288,34 @@ pmlPlot = plot(showPM ? pmLow  : na, "Pre-market low",  colPM, 1, plot.style_cir
 fill(pmhPlot, pmlPlot, color=showPM and inChop ? color.new(colPM, 92) : na, title="PMH–PML chop range")
 
 // ─── Signal shapes ───────────────────────────────────────────────────────────
-plotshape(showDips and dip13First, "13 EMA first dip",  shape.triangleup,   location.belowbar, color=col13, text="DIP", textcolor=col13, size=size.tiny)
-plotshape(showDips and dip13ReAdd, "13 EMA re-add dip", shape.triangleup,   location.belowbar, color=col13, text="ADD", textcolor=col13, size=size.tiny)
-plotshape(showDips and dip13Later, "13 EMA later dip",  shape.triangleup,   location.belowbar, color=color.new(#f5d33a, 40), size=size.tiny)
-plotshape(showDips and dip48Sig,   "48 EMA dip",        shape.triangleup,   location.belowbar, color=col48, text="48",  textcolor=col48, size=size.tiny)
-plotshape(showDips and pop13Sig,   "13 EMA pop",        shape.triangledown, location.abovebar, color=col13, text="POP", textcolor=col13, size=size.tiny)
+// Minimal mode: one BUY and one SELL marker, nothing else
+plotshape(minimal and buySig,  "BUY",  shape.labelup,   location.belowbar, color=color.new(#089981, 0), text="BUY",  textcolor=color.white, size=size.tiny)
+plotshape(minimal and sellSig, "SELL", shape.labeldown, location.abovebar, color=color.new(#f23645, 0), text="SELL", textcolor=color.white, size=size.tiny)
 
-plotshape(showFlags and bullFlagSig, "Bull flag break", shape.flag, location.belowbar, color=color.new(#089981, 0), size=size.tiny)
-plotshape(showFlags and bearFlagSig, "Bear flag break", shape.flag, location.abovebar, color=color.new(#f23645, 0), size=size.tiny)
+// Detailed mode: the individual setup tags
+det = not minimal
+plotshape(det and showDips and dip13First, "13 EMA first dip",  shape.triangleup,   location.belowbar, color=col13, text="DIP", textcolor=col13, size=size.tiny)
+plotshape(det and showDips and dip13ReAdd, "13 EMA re-add dip", shape.triangleup,   location.belowbar, color=col13, text="ADD", textcolor=col13, size=size.tiny)
+plotshape(det and showDips and dip13Later, "13 EMA later dip",  shape.triangleup,   location.belowbar, color=color.new(#f5d33a, 40), size=size.tiny)
+plotshape(det and showDips and dip48Sig,   "48 EMA dip",        shape.triangleup,   location.belowbar, color=col48, text="48",  textcolor=col48, size=size.tiny)
+plotshape(det and showDips and pop13Sig,   "13 EMA pop",        shape.triangledown, location.abovebar, color=col13, text="POP", textcolor=col13, size=size.tiny)
 
-plotshape(showCross and crossBullSig, "Bullish 13/48 cross", shape.xcross, location.belowbar, color=color.new(#089981, 0), size=size.tiny)
-plotshape(showCross and crossBearSig, "Bearish 13/48 cross", shape.xcross, location.abovebar, color=color.new(#f23645, 0), size=size.tiny)
-plotshape(showCross and revConfBull, "Reversal confirmed up",   shape.labelup,   location.belowbar, color=color.new(#089981, 0), text="REV", textcolor=color.white, size=size.tiny)
-plotshape(showCross and revConfBear, "Reversal confirmed down", shape.labeldown, location.abovebar, color=color.new(#f23645, 0), text="REV", textcolor=color.white, size=size.tiny)
+plotshape(det and showFlags and bullFlagSig, "Bull flag break", shape.flag, location.belowbar, color=color.new(#089981, 0), size=size.tiny)
+plotshape(det and showFlags and bearFlagSig, "Bear flag break", shape.flag, location.abovebar, color=color.new(#f23645, 0), size=size.tiny)
 
-plotshape(showLevels and rejectPdhSig, "PDH rejection",          shape.triangledown, location.abovebar, color=color.new(#f23645, 0), text="REJ", textcolor=color.new(#f23645, 0), size=size.tiny)
-plotshape(showLevels and retestPdhSig, "PDH break&retest hold",  shape.triangleup,   location.belowbar, color=color.new(#089981, 0), text="B&R", textcolor=color.new(#089981, 0), size=size.tiny)
-plotshape(showLevels and bouncePdlSig, "PDL bounce",             shape.triangleup,   location.belowbar, color=color.new(#089981, 0), text="BNC", textcolor=color.new(#089981, 0), size=size.tiny)
-plotshape(showLevels and retestPdlSig, "PDL break&retest fail",  shape.triangledown, location.abovebar, color=color.new(#f23645, 0), text="B&R", textcolor=color.new(#f23645, 0), size=size.tiny)
-plotshape(showLevels and pdhSupSig,    "PDH support hold",       shape.triangleup,   location.belowbar, color=color.new(#089981, 0), text="SUP", textcolor=color.new(#089981, 0), size=size.tiny)
-plotshape(showLevels and pdlResSig,    "PDL resistance fail",    shape.triangledown, location.abovebar, color=color.new(#f23645, 0), text="RES", textcolor=color.new(#f23645, 0), size=size.tiny)
-plotshape(showLevels and pmhBreakSig,  "PMH resistance break",   shape.triangleup,   location.belowbar, color=colPM, text="BRK", textcolor=color.new(#089981, 0), size=size.tiny)
-plotshape(showLevels and pmlBreakSig,  "PML support break",      shape.triangledown, location.abovebar, color=colPM, text="BRK", textcolor=color.new(#f23645, 0), size=size.tiny)
+plotshape(det and showCross and crossBullSig, "Bullish 13/48 cross", shape.xcross, location.belowbar, color=color.new(#089981, 0), size=size.tiny)
+plotshape(det and showCross and crossBearSig, "Bearish 13/48 cross", shape.xcross, location.abovebar, color=color.new(#f23645, 0), size=size.tiny)
+plotshape(det and showCross and revConfBull, "Reversal confirmed up",   shape.labelup,   location.belowbar, color=color.new(#089981, 0), text="REV", textcolor=color.white, size=size.tiny)
+plotshape(det and showCross and revConfBear, "Reversal confirmed down", shape.labeldown, location.abovebar, color=color.new(#f23645, 0), text="REV", textcolor=color.white, size=size.tiny)
+
+plotshape(det and showLevels and rejectPdhSig, "PDH rejection",          shape.triangledown, location.abovebar, color=color.new(#f23645, 0), text="REJ", textcolor=color.new(#f23645, 0), size=size.tiny)
+plotshape(det and showLevels and retestPdhSig, "PDH break&retest hold",  shape.triangleup,   location.belowbar, color=color.new(#089981, 0), text="B&R", textcolor=color.new(#089981, 0), size=size.tiny)
+plotshape(det and showLevels and bouncePdlSig, "PDL bounce",             shape.triangleup,   location.belowbar, color=color.new(#089981, 0), text="BNC", textcolor=color.new(#089981, 0), size=size.tiny)
+plotshape(det and showLevels and retestPdlSig, "PDL break&retest fail",  shape.triangledown, location.abovebar, color=color.new(#f23645, 0), text="B&R", textcolor=color.new(#f23645, 0), size=size.tiny)
+plotshape(det and showLevels and pdhSupSig,    "PDH support hold",       shape.triangleup,   location.belowbar, color=color.new(#089981, 0), text="SUP", textcolor=color.new(#089981, 0), size=size.tiny)
+plotshape(det and showLevels and pdlResSig,    "PDL resistance fail",    shape.triangledown, location.abovebar, color=color.new(#f23645, 0), text="RES", textcolor=color.new(#f23645, 0), size=size.tiny)
+plotshape(det and showLevels and pmhBreakSig,  "PMH resistance break",   shape.triangleup,   location.belowbar, color=colPM, text="BRK", textcolor=color.new(#089981, 0), size=size.tiny)
+plotshape(det and showLevels and pmlBreakSig,  "PML support break",      shape.triangledown, location.abovebar, color=colPM, text="BRK", textcolor=color.new(#f23645, 0), size=size.tiny)
 
 // ─── Level name labels (right edge) ──────────────────────────────────────────
 var label pdhLbl = na
@@ -362,49 +378,18 @@ if showTable and barstate.islast
         table.merge_cells(biasTbl, 0, 7, 1, 7)
         table.merge_cells(biasTbl, 0, 8, 1, 8)
 
-// ─── Alerts ──────────────────────────────────────────────────────────────────
-// alert() instead of alertcondition() — alertconditions count toward the
-// 64-output plot limit; alert() calls don't. Set up ONE alert on this
-// indicator with condition "Any alert() function call" to receive all of these.
+// ─── Alerts: two signals, that's it ──────────────────────────────────────────
+// The alert message names the setup that fired. One TradingView alert with
+// condition "Any alert() function call" covers both, or use the BUY / SELL
+// alertconditions individually.
+buyReason  = dip13Sig ? "13 EMA dip" : dip48Sig ? "48 EMA dip" : bullFlagSig ? "bull flag break" : pmhBreakSig ? "PMH break confirmed" : retestPdhSig ? "PDH break & retest held" : bouncePdlSig ? "PDL bounce" : pdhSupSig ? "PDH held as support" : revConfBull ? "reversal confirmed up" : "confluence"
+sellReason = pop13Sig ? "13 EMA pop" : bearFlagSig ? "bear flag break" : pmlBreakSig ? "PML break confirmed" : rejectPdhSig ? "PDH rejection" : retestPdlSig ? "PDL retest failed" : pdlResSig ? "PDL held as resistance" : revConfBear ? "reversal confirmed down" : "confluence"
+
 if alertsOn
-    sym = syminfo.ticker + ": "
-    if showDips and dip13First
-        alert(sym + "Bullish — first 13 EMA dip of the leg (trend entry zone)", alert.freq_once_per_bar)
-    if showDips and dip13ReAdd
-        alert(sym + "Bullish — second 13 EMA dip (re-add spot if it holds)", alert.freq_once_per_bar)
-    if showDips and dip48Sig
-        alert(sym + "Bullish — deeper pullback into the 48 EMA holding trend", alert.freq_once_per_bar)
-    if showDips and pop13Sig
-        alert(sym + "Bearish — rally into the 13 EMA in a downtrend (short-the-pop zone)", alert.freq_once_per_bar)
-    if showFlags and bullFlagSig
-        alert(sym + "Bull flag micro-break — pullback held the fan, broke prior high", alert.freq_once_per_bar)
-    if showFlags and bearFlagSig
-        alert(sym + "Bear flag micro-break — pop failed at the fan, broke prior low", alert.freq_once_per_bar)
-    if showCross and crossBullSig
-        alert(sym + "Bullish 13/48 EMA cross", alert.freq_once_per_bar)
-    if showCross and crossBearSig
-        alert(sym + "Bearish 13/48 EMA cross — short-term trend shift", alert.freq_once_per_bar)
-    if showCross and revConfBull
-        alert(sym + "REVERSAL CONFIRMED UP — PDL bounce + bullish 13/48 cross", alert.freq_once_per_bar)
-    if showCross and revConfBear
-        alert(sym + "REVERSAL CONFIRMED DOWN — PDH reject + bearish 13/48 cross", alert.freq_once_per_bar)
-    if showLevels and rejectPdhSig
-        alert(sym + "Rejected at the previous day high zone — bearish", alert.freq_once_per_bar)
-    if showLevels and retestPdhSig
-        alert(sym + "PDH break & retest HELD — bullish", alert.freq_once_per_bar)
-    if showLevels and bouncePdlSig
-        alert(sym + "Bounced off the previous day low zone — bullish", alert.freq_once_per_bar)
-    if showLevels and retestPdlSig
-        alert(sym + "PDL break & retest FAILED — bearish", alert.freq_once_per_bar)
-    if showLevels and pdhSupSig
-        alert(sym + "Opened above PDH — dip into the zone held as support, bullish", alert.freq_once_per_bar)
-    if showLevels and pdlResSig
-        alert(sym + "Opened below PDL — pop into the zone failed as resistance, bearish", alert.freq_once_per_bar)
-    if showLevels and pmhBreakSig
-        alert(sym + "Broke the pre-market high — calls trigger", alert.freq_once_per_bar)
-    if showLevels and pmlBreakSig
-        alert(sym + "Broke the pre-market low — puts trigger", alert.freq_once_per_bar)
-    if aboveAllFlipUp
-        alert(sym + "BULLS TAKE FULL CONTROL — price above all 3 EMAs, calls only", alert.freq_once_per_bar)
-    if belowAllFlipDn
-        alert(sym + "BEARS TAKE FULL CONTROL — price below all 3 EMAs, puts only", alert.freq_once_per_bar)
+    if buySig
+        alert(syminfo.ticker + ": BUY — " + buyReason, alert.freq_once_per_bar)
+    if sellSig
+        alert(syminfo.ticker + ": SELL — " + sellReason, alert.freq_once_per_bar)
+
+alertcondition(buySig,  "BUY signal",  "Bullish confluence entry")
+alertcondition(sellSig, "SELL signal", "Bearish confluence entry")

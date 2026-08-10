@@ -38,6 +38,7 @@ showFlags  = input.bool(true, "Micro flag break signals", group=grpS)
 showCross  = input.bool(true, "13/48 EMA cross + reversal confirmation", group=grpS)
 showLevels = input.bool(true, "PDH / PDL reject, bounce, break & retest", group=grpS)
 coolBars   = input.int(6, "Min bars between level signals", minval=0, group=grpS, tooltip="Cooldown so a choppy fight at a level doesn't spam signals.")
+compGap    = input.int(10, "Min bars between BUY/SELL signals", minval=0, group=grpS, tooltip="Global cooldown for the composite BUY/SELL markers — no clusters, no rapid-fire flip-flops. 10 bars on a 2m chart = 20 minutes.")
 chopFilter = input.bool(true, "Mute trend entries inside PMH–PML chop range", group=grpS, tooltip="Avoid trading anything between the pre-market high and low. While price is inside that range, EMA dip, flag, and 13/48 cross signals are muted. Level plays and PMH/PML breaks still fire.")
 rthOnly    = input.bool(true, "Signals during regular hours only", group=grpS, tooltip="Suppress all signals outside the cash session. Levels and EMAs still draw on extended-hours bars.")
 sigWindow  = input.session("0945-1600", "Signal window (New York time)", group=grpS, tooltip="No trades until 9:45 — the opening 15 minutes are skipped. All signals only fire inside this window.")
@@ -241,11 +242,23 @@ revConfBear = crossBearSig and not na(lastRejBar) and bar_index - lastRejBar <= 
 revConfBull = crossBullSig and not na(lastBncBar) and bar_index - lastBncBar <= 20
 
 // ─── Composite BUY / SELL — one green arrow, one red arrow ───────────────────
-// Every gated confluence event funnels into a single signal per direction.
-// The family toggles above choose which setups feed the composite.
+// Bias-aligned: no SELL above the 13/48, no BUY below it. A raw PDH rejection
+// or PDL bounce is only a FIRST confirmation — it arms the REV signal (level
+// play + EMA cross agree), which is the actual reversal entry. The composite
+// is also chop-muted, except PMH/PML breaks: those are the exit from chop.
 minimal = sigStyle == "Minimal (BUY / SELL)"
-buySig  = (showDips and (dip13Sig or dip48Sig)) or (showFlags and bullFlagSig) or (showLevels and (retestPdhSig or bouncePdlSig or pdhSupSig or pmhBreakSig)) or (showCross and revConfBull)
-sellSig = (showDips and pop13Sig) or (showFlags and bearFlagSig) or (showLevels and (rejectPdhSig or retestPdlSig or pdlResSig or pmlBreakSig)) or (showCross and revConfBear)
+
+buyRaw  = ((showDips and (dip13Sig or dip48Sig)) or (showFlags and bullFlagSig) or (showLevels and (retestPdhSig or pdhSupSig)) or (showCross and revConfBull)) and close > ema48 and not chopMute
+buyRaw := buyRaw or (showLevels and pmhBreakSig)
+sellRaw  = ((showDips and pop13Sig) or (showFlags and bearFlagSig) or (showLevels and (retestPdlSig or pdlResSig)) or (showCross and revConfBear)) and close < ema48 and not chopMute
+sellRaw := sellRaw or (showLevels and pmlBreakSig)
+
+var int lastCompBar = na
+canComp = na(lastCompBar) or bar_index - lastCompBar >= compGap
+buySig  = buyRaw and canComp
+sellSig = sellRaw and canComp
+if buySig or sellSig
+    lastCompBar := bar_index
 
 // ─── Bias score ──────────────────────────────────────────────────────────────
 bullPts = (close > pdh ? 1 : 0) + (not na(pmHigh) and close > pmHigh ? 1 : 0) + (bullFan ? 1 : 0) + (above200 ? 1 : 0)
@@ -382,8 +395,8 @@ if showTable and barstate.islast
 // The alert message names the setup that fired. One TradingView alert with
 // condition "Any alert() function call" covers both, or use the BUY / SELL
 // alertconditions individually.
-buyReason  = dip13Sig ? "13 EMA dip" : dip48Sig ? "48 EMA dip" : bullFlagSig ? "bull flag break" : pmhBreakSig ? "PMH break confirmed" : retestPdhSig ? "PDH break & retest held" : bouncePdlSig ? "PDL bounce" : pdhSupSig ? "PDH held as support" : revConfBull ? "reversal confirmed up" : "confluence"
-sellReason = pop13Sig ? "13 EMA pop" : bearFlagSig ? "bear flag break" : pmlBreakSig ? "PML break confirmed" : rejectPdhSig ? "PDH rejection" : retestPdlSig ? "PDL retest failed" : pdlResSig ? "PDL held as resistance" : revConfBear ? "reversal confirmed down" : "confluence"
+buyReason  = dip13Sig ? "13 EMA dip" : dip48Sig ? "48 EMA dip" : bullFlagSig ? "bull flag break" : pmhBreakSig ? "PMH break confirmed" : retestPdhSig ? "PDH break & retest held" : pdhSupSig ? "PDH held as support" : revConfBull ? "reversal confirmed up" : "confluence"
+sellReason = pop13Sig ? "13 EMA pop" : bearFlagSig ? "bear flag break" : pmlBreakSig ? "PML break confirmed" : retestPdlSig ? "PDL retest failed" : pdlResSig ? "PDL held as resistance" : revConfBear ? "reversal confirmed down" : "confluence"
 
 if alertsOn
     if buySig

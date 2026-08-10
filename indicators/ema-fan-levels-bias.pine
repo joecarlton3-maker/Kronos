@@ -54,6 +54,12 @@ grpT      = "Table"
 showTable = input.bool(true, "Bias checklist table", group=grpT)
 tblPosStr = input.string("Top right", "Table position", options=["Top right", "Top left", "Bottom right", "Bottom left"], group=grpT)
 
+grpV       = "Visuals"
+showBarCol = input.bool(true, "Regime bar coloring", group=grpV, tooltip="Gray candles = stand down (chop or bunched EMAs). Solid teal/red = momentum regime. Faded teal/red = trend without spread.")
+showRibbon = input.bool(true, "13/48 momentum ribbon", group=grpV, tooltip="Band between the 13 and 48 EMAs. Near-invisible when they braid, solid as the fan opens — momentum strength at a glance.")
+fadeChop   = input.bool(true, "Fade 13/48 EMAs when bunched", group=grpV)
+showBiasBg = input.bool(false, "Faint bias background tint", group=grpV)
+
 // ─── EMA fan ─────────────────────────────────────────────────────────────────
 ema13  = ta.ema(close, len13)
 ema48  = ta.ema(close, len48)
@@ -74,6 +80,7 @@ fanSpreadUp = ema13 - ema48 >= atrVal * spreadMult
 fanSpreadDn = ema48 - ema13 >= atrVal * spreadMult
 momoUp      = trendUp and fanSpreadUp
 momoDn      = trendDn and fanSpreadDn
+bunched     = not fanSpreadUp and not fanSpreadDn
 
 // ─── Key levels ──────────────────────────────────────────────────────────────
 newDay = timeframe.change("D")
@@ -201,6 +208,9 @@ if pmlBreakSig
 inChop   = not na(pmHigh) and not na(pmLow) and close < pmHigh and close > pmLow
 chopMute = chopFilter and inChop
 
+// Visual stand-down state: inside the pre-market range OR EMAs bunched
+visualChop = inChop or bunched
+
 // ─── EMA dip / pop signals ───────────────────────────────────────────────────
 touch13  = low <= ema13 and low[1] > ema13[1]
 touch48  = low <= ema48 and low[1] > ema48[1]
@@ -281,10 +291,26 @@ biasCol = switch
 bsFlagUp     = ta.barssince(bullFlagSig)
 flagRecentUp = not na(bsFlagUp) and bsFlagUp <= 30
 
+// ─── Visual layer: regime bars, momentum ribbon, bias tint ───────────────────
+// Gray = stand down (chop/bunched). Solid teal/red = momentum. Faded = trend
+// without spread. Priority: chop beats everything.
+barCol = visualChop ? #787b86 : momoUp ? #089981 : momoDn ? #f23645 : trendUp ? color.new(#089981, 55) : trendDn ? color.new(#f23645, 55) : na
+barcolor(showBarCol ? barCol : na, title="Regime bars")
+
 // ─── Plots: EMAs, levels, zones ──────────────────────────────────────────────
-plot(ema13,  "13 EMA",  col13,  2)
-plot(ema48,  "48 EMA",  col48,  2)
+// 13/48 drop to width 1 and fade when bunched — the ribbon carries the weight.
+// The 200 stays width 2: it's a level, not a momentum line.
+p13 = plot(ema13, "13 EMA", color.new(col13, fadeChop and bunched ? 65 : 0), 1)
+p48 = plot(ema48, "48 EMA", color.new(col48, fadeChop and bunched ? 65 : 0), 1)
 plot(ema200, "200 EMA", col200, 2)
+
+// Momentum ribbon: near-invisible when the EMAs braid, solid as the fan opens
+spreadRatio = atrVal > 0 ? math.abs(ema13 - ema48) / atrVal : 0.0
+dirCol = ema13 >= ema48 ? #089981 : #f23645
+ribCol = color.from_gradient(spreadRatio, 0.0, math.max(spreadMult, 0.1) * 2, color.new(dirCol, 96), color.new(dirCol, 72))
+fill(p13, p48, color=showRibbon ? ribCol : na, title="13/48 momentum ribbon")
+
+bgcolor(showBiasBg ? (bullPts >= 3 ? color.new(#089981, 94) : bearPts >= 3 ? color.new(#f23645, 94) : na) : na, title="Bias tint")
 
 hidden = color.new(color.blue, 100)
 plot(showPD ? pdh : na, "PDH", colPD, 2, plot.style_linebr)
@@ -316,10 +342,10 @@ plotshape(det and showDips and pop13Sig,   "13 EMA pop",        shape.triangledo
 plotshape(det and showFlags and bullFlagSig, "Bull flag break", shape.flag, location.belowbar, color=color.new(#089981, 0), size=size.tiny)
 plotshape(det and showFlags and bearFlagSig, "Bear flag break", shape.flag, location.abovebar, color=color.new(#f23645, 0), size=size.tiny)
 
-// Cross X markers show in BOTH modes — green X below = bullish cross,
-// red X above = bearish cross (whipsaw-filtered)
-plotshape(showCross and crossBullSig, "Bullish 13/48 cross", shape.xcross, location.belowbar, color=color.new(#089981, 0), size=size.tiny)
-plotshape(showCross and crossBearSig, "Bearish 13/48 cross", shape.xcross, location.abovebar, color=color.new(#f23645, 0), size=size.tiny)
+// Cross X markers (detailed mode only — the regime bar coloring carries the
+// cross/trend information in minimal mode)
+plotshape(det and showCross and crossBullSig, "Bullish 13/48 cross", shape.xcross, location.belowbar, color=color.new(#089981, 0), size=size.tiny)
+plotshape(det and showCross and crossBearSig, "Bearish 13/48 cross", shape.xcross, location.abovebar, color=color.new(#f23645, 0), size=size.tiny)
 plotshape(det and showCross and revConfBull, "Reversal confirmed up",   shape.labelup,   location.belowbar, color=color.new(#089981, 0), text="REV", textcolor=color.white, size=size.tiny)
 plotshape(det and showCross and revConfBear, "Reversal confirmed down", shape.labeldown, location.abovebar, color=color.new(#f23645, 0), text="REV", textcolor=color.white, size=size.tiny)
 
@@ -385,7 +411,6 @@ if showTable and barstate.islast
     table.cell(biasTbl, 0, 6, "Bull-flaggy price action", text_color=txtCol, text_size=size.tiny, text_halign=text.align_left)
     table.cell(biasTbl, 1, 6, chk(flagRecentUp), text_size=size.tiny)
     table.cell(biasTbl, 0, 7, biasTxt, text_color=biasCol, text_size=size.small)
-    bunched  = not fanSpreadUp and not fanSpreadDn
     guideTxt = inChop ? "Chop: inside PMH–PML — be patient" : bunched ? "EMAs bunched — no momentum yet" : close > ema13 and close > ema48 ? "No shorts above the 13/48" : close < ema13 and close < ema48 ? "No longs below the 13/48" : "Mixed — wait for structure"
     table.cell(biasTbl, 0, 8, guideTxt, text_color=color.new(#b2b5be, 0), text_size=size.tiny)
     if firstBuild

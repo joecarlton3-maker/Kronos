@@ -38,6 +38,7 @@ showLevels = input.bool(true, "PDH / PDL reject, bounce, break & retest", group=
 coolBars   = input.int(6, "Min bars between level signals", minval=0, group=grpS, tooltip="Cooldown so a choppy fight at a level doesn't spam signals.")
 chopFilter = input.bool(true, "Mute trend entries inside PMH–PML chop range", group=grpS, tooltip="Avoid trading anything between the pre-market high and low. While price is inside that range, EMA dip, flag, and 13/48 cross signals are muted. Level plays and PMH/PML breaks still fire.")
 rthOnly    = input.bool(true, "Signals during regular hours only", group=grpS, tooltip="Suppress all signals outside the cash session. Levels and EMAs still draw on extended-hours bars.")
+sigWindow  = input.session("0945-1600", "Signal window (New York time)", group=grpS, tooltip="No trades until 9:45 — the opening 15 minutes are skipped. All signals only fire inside this window.")
 crossGap   = input.int(10, "13/48 cross whipsaw filter (min bars)", minval=0, group=grpS, tooltip="A 13/48 cross only signals if the previous cross was at least this many bars ago. Kills the braided-EMA spam on rangebound days.")
 spreadMult = input.float(0.5, "Min 13/48 spread for momentum (ATR mult)", minval=0.0, step=0.1, group=grpS, tooltip="Bunched-up EMAs = no momentum = chop. Dip and flag entries only fire once the 13/48 EMA separation exceeds this many ATRs — the 'fan out' that shows momentum is present. Set to 0 to disable.")
 
@@ -111,8 +112,10 @@ if na(rthOpen) and session.ismarket
 openAbovePdh = not na(rthOpen) and rthOpen > pdh
 openBelowPdl = not na(rthOpen) and rthOpen < pdl
 
-// Session gate for signals — you trade the cash session, not the halo around it
-sigSession = not rthOnly or session.ismarket
+// Session gate for signals — cash session only, and nothing before 9:45:
+// the opening 15 minutes are FOMO bait, not structure
+inWindow   = not na(time(timeframe.period, sigWindow, "America/New_York"))
+sigSession = (not rthOnly or session.ismarket) and inWindow
 
 // ─── Level break state (for break & retest vs. first-touch plays) ────────────
 crossUpPdh = ta.crossover(close, pdh)
@@ -169,8 +172,8 @@ var bool pmlBroken = false
 if newDay
     pmhBroken := false
     pmlBroken := false
-pmhBreakSig = not pmhBroken and crossUpPmh and session.ismarket and barstate.isconfirmed
-pmlBreakSig = not pmlBroken and crossDnPml and session.ismarket and barstate.isconfirmed
+pmhBreakSig = not pmhBroken and crossUpPmh and session.ismarket and inWindow and barstate.isconfirmed
+pmlBreakSig = not pmlBroken and crossDnPml and session.ismarket and inWindow and barstate.isconfirmed
 if pmhBreakSig
     pmhBroken := true
 if pmlBreakSig

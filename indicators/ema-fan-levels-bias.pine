@@ -39,6 +39,7 @@ coolBars   = input.int(6, "Min bars between level signals", minval=0, group=grpS
 chopFilter = input.bool(true, "Mute trend entries inside PMH–PML chop range", group=grpS, tooltip="Avoid trading anything between the pre-market high and low. While price is inside that range, EMA dip, flag, and 13/48 cross signals are muted. Level plays and PMH/PML breaks still fire.")
 rthOnly    = input.bool(true, "Signals during regular hours only", group=grpS, tooltip="Suppress all signals outside the cash session. Levels and EMAs still draw on extended-hours bars.")
 crossGap   = input.int(10, "13/48 cross whipsaw filter (min bars)", minval=0, group=grpS, tooltip="A 13/48 cross only signals if the previous cross was at least this many bars ago. Kills the braided-EMA spam on rangebound days.")
+spreadMult = input.float(0.5, "Min 13/48 spread for momentum (ATR mult)", minval=0.0, step=0.1, group=grpS, tooltip="Bunched-up EMAs = no momentum = chop. Dip and flag entries only fire once the 13/48 EMA separation exceeds this many ATRs — the 'fan out' that shows momentum is present. Set to 0 to disable.")
 
 grpA     = "Alerts"
 alertsOn = input.bool(true, "Enable alert() events", group=grpA, tooltip="Create ONE TradingView alert on this indicator with condition 'Any alert() function call' and you'll receive every signal below. Signals are gated by their display toggles — hide a signal group to also mute its alerts.")
@@ -59,6 +60,14 @@ aboveAll = close > ema13 and close > ema48 and close > ema200
 belowAll = close < ema13 and close < ema48 and close < ema200
 trendUp  = bullFan and above200
 trendDn  = bearFan and not above200
+
+// Fan spacing = momentum. Bunched EMAs mean chop even when technically aligned;
+// entries wait for the fan to open up.
+atrVal      = ta.atr(14)
+fanSpreadUp = ema13 - ema48 >= atrVal * spreadMult
+fanSpreadDn = ema48 - ema13 >= atrVal * spreadMult
+momoUp      = trendUp and fanSpreadUp
+momoDn      = trendDn and fanSpreadDn
 
 // ─── Key levels ──────────────────────────────────────────────────────────────
 newDay = timeframe.change("D")
@@ -174,9 +183,9 @@ chopMute = chopFilter and inChop
 // ─── EMA dip / pop signals ───────────────────────────────────────────────────
 touch13  = low <= ema13 and low[1] > ema13[1]
 touch48  = low <= ema48 and low[1] > ema48[1]
-dip13Sig = trendUp and touch13 and close > ema13 and not chopMute and sigSession and barstate.isconfirmed
-dip48Sig = trendUp and touch48 and close > ema48 and not chopMute and sigSession and barstate.isconfirmed
-pop13Sig = trendDn and high >= ema13 and high[1] < ema13[1] and close < ema13 and not chopMute and sigSession and barstate.isconfirmed
+dip13Sig = momoUp and touch13 and close > ema13 and not chopMute and sigSession and barstate.isconfirmed
+dip48Sig = momoUp and touch48 and close > ema48 and not chopMute and sigSession and barstate.isconfirmed
+pop13Sig = momoDn and high >= ema13 and high[1] < ema13[1] and close < ema13 and not chopMute and sigSession and barstate.isconfirmed
 
 // 13/48 crosses with whipsaw filter: when the EMAs braid in chop they cross
 // every few bars — only the first cross after a stable stretch is a signal
@@ -204,8 +213,8 @@ dip13Later = dip13Sig and dipCount > 2
 
 // ─── Micro flag breaks ───────────────────────────────────────────────────────
 // Two lower-high pullback bars holding the fan, then a close through the prior high
-bullFlagSig = trendUp and close > ema13 and low > ema48 and close > high[1] and high[1] < high[2] and high[2] < high[3] and not chopMute and sigSession and barstate.isconfirmed
-bearFlagSig = trendDn and close < ema13 and high < ema48 and close < low[1] and low[1] > low[2] and low[2] > low[3] and not chopMute and sigSession and barstate.isconfirmed
+bullFlagSig = momoUp and close > ema13 and low > ema48 and close > high[1] and high[1] < high[2] and high[2] < high[3] and not chopMute and sigSession and barstate.isconfirmed
+bearFlagSig = momoDn and close < ema13 and high < ema48 and close < low[1] and low[1] > low[2] and low[2] > low[3] and not chopMute and sigSession and barstate.isconfirmed
 
 // ─── Reversal confirmation: level play + EMA cross agree ─────────────────────
 revConfBear = crossBearSig and not na(lastRejBar) and bar_index - lastRejBar <= 20
@@ -314,7 +323,7 @@ var table biasTbl = na
 if showTable and barstate.islast
     bool firstBuild = na(biasTbl)
     if firstBuild
-        biasTbl := table.new(tblPos, 2, 8, bgcolor=color.new(#131722, 15), frame_width=1, frame_color=color.new(#363a45, 0), border_width=1, border_color=color.new(#363a45, 0))
+        biasTbl := table.new(tblPos, 2, 9, bgcolor=color.new(#131722, 15), frame_width=1, frame_color=color.new(#363a45, 0), border_width=1, border_color=color.new(#363a45, 0))
     txtCol = color.new(#d1d4dc, 0)
     table.cell(biasTbl, 0, 0, "BIAS CHECKLIST", text_color=color.white, text_size=size.small, bgcolor=color.new(#2962ff, 40))
     pdhRowTxt = openAbovePdh ? "Above PDH — main support" : "Above prev day high"
@@ -324,17 +333,20 @@ if showTable and barstate.islast
     table.cell(biasTbl, 1, 2, na(pmHigh) ? "—" : chk(close > pmHigh), text_color=txtCol, text_size=size.tiny)
     table.cell(biasTbl, 0, 3, "Bullish EMA fan (13>48>200)", text_color=txtCol, text_size=size.tiny, text_halign=text.align_left)
     table.cell(biasTbl, 1, 3, chk(bullFan), text_size=size.tiny)
-    table.cell(biasTbl, 0, 4, "Above 200 EMA",         text_color=txtCol, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(biasTbl, 1, 4, chk(above200), text_size=size.tiny)
-    table.cell(biasTbl, 0, 5, "Bull-flaggy price action", text_color=txtCol, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(biasTbl, 1, 5, chk(flagRecentUp), text_size=size.tiny)
-    table.cell(biasTbl, 0, 6, biasTxt, text_color=biasCol, text_size=size.small)
-    guideTxt = inChop ? "Chop: inside PMH–PML — be patient" : close > ema13 and close > ema48 ? "No shorts above the 13/48" : close < ema13 and close < ema48 ? "No longs below the 13/48" : "Mixed — wait for structure"
-    table.cell(biasTbl, 0, 7, guideTxt, text_color=color.new(#b2b5be, 0), text_size=size.tiny)
+    table.cell(biasTbl, 0, 4, "Fan spaced out (momentum)", text_color=txtCol, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(biasTbl, 1, 4, chk(bullFan and fanSpreadUp), text_size=size.tiny)
+    table.cell(biasTbl, 0, 5, "Above 200 EMA",         text_color=txtCol, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(biasTbl, 1, 5, chk(above200), text_size=size.tiny)
+    table.cell(biasTbl, 0, 6, "Bull-flaggy price action", text_color=txtCol, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(biasTbl, 1, 6, chk(flagRecentUp), text_size=size.tiny)
+    table.cell(biasTbl, 0, 7, biasTxt, text_color=biasCol, text_size=size.small)
+    bunched  = not fanSpreadUp and not fanSpreadDn
+    guideTxt = inChop ? "Chop: inside PMH–PML — be patient" : bunched ? "EMAs bunched — no momentum yet" : close > ema13 and close > ema48 ? "No shorts above the 13/48" : close < ema13 and close < ema48 ? "No longs below the 13/48" : "Mixed — wait for structure"
+    table.cell(biasTbl, 0, 8, guideTxt, text_color=color.new(#b2b5be, 0), text_size=size.tiny)
     if firstBuild
         table.merge_cells(biasTbl, 0, 0, 1, 0)
-        table.merge_cells(biasTbl, 0, 6, 1, 6)
         table.merge_cells(biasTbl, 0, 7, 1, 7)
+        table.merge_cells(biasTbl, 0, 8, 1, 8)
 
 // ─── Alerts ──────────────────────────────────────────────────────────────────
 // alert() instead of alertcondition() — alertconditions count toward the

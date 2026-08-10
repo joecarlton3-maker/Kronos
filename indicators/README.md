@@ -65,7 +65,9 @@ above 200 EMA) plus a bull-flaggy price-action row, and prints a verdict from
    breaks, and EMA cross / reversal signals still fire — those are the exits
    from the chop.
 
-**Trend continuation** (only while the fan and 200 EMA agree):
+**Trend continuation** (only while the fan and 200 EMA agree **and the fan is
+spaced out** — bunched-up EMAs mean no momentum, so dip/flag entries wait for
+the 13/48 separation to exceed an ATR-scaled threshold):
 
 - `13 DIP` — first pullback into the 13 EMA that holds → entry zone
 - `RE-ADD` — second 13 EMA dip → add spot if it holds

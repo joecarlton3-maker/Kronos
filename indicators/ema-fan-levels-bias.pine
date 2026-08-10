@@ -37,6 +37,9 @@ showCross  = input.bool(true, "13/48 EMA cross + reversal confirmation", group=g
 showLevels = input.bool(true, "PDH / PDL reject, bounce, break & retest", group=grpS)
 coolBars   = input.int(6, "Min bars between level signals", minval=0, group=grpS, tooltip="Cooldown so a choppy fight at a level doesn't spam signals.")
 
+grpA     = "Alerts"
+alertsOn = input.bool(true, "Enable alert() events", group=grpA, tooltip="Create ONE TradingView alert on this indicator with condition 'Any alert() function call' and you'll receive every signal below. Signals are gated by their display toggles — hide a signal group to also mute its alerts.")
+
 grpT      = "Table & Background"
 showTable = input.bool(true, "Bias checklist table", group=grpT)
 tblPosStr = input.string("Top right", "Table position", options=["Top right", "Top left", "Bottom right", "Bottom left"], group=grpT)
@@ -304,23 +307,48 @@ if showTable and barstate.islast
         table.merge_cells(biasTbl, 0, 7, 1, 7)
 
 // ─── Alerts ──────────────────────────────────────────────────────────────────
-alertcondition(dip13First,     "Bullish: first 13 EMA dip",           "First 13 EMA dip of the leg — trend entry zone")
-alertcondition(dip13ReAdd,     "Bullish: second 13 EMA dip (re-add)", "Second 13 EMA dip — re-add spot if it holds")
-alertcondition(dip48Sig,       "Bullish: 48 EMA dip",                 "Deeper pullback into the 48 EMA holding trend")
-alertcondition(pop13Sig,       "Bearish: 13 EMA pop",                 "Rally into the 13 EMA in a downtrend — short-the-pop zone")
-alertcondition(bullFlagSig,    "Bull flag micro-break",               "Pullback held the fan and broke the prior high")
-alertcondition(bearFlagSig,    "Bear flag micro-break",               "Pop failed at the fan and broke the prior low")
-alertcondition(crossBullSig,   "Bullish 13/48 EMA cross",             "13 EMA crossed above the 48 EMA")
-alertcondition(crossBearSig,   "Bearish 13/48 EMA cross",             "13 EMA crossed below the 48 EMA — short-term trend shift")
-alertcondition(rejectPdhSig,   "PDH rejection",                       "Rejected at the previous day high zone — bearish")
-alertcondition(retestPdhSig,   "PDH break & retest hold",             "Broke PDH and the retest held — bullish")
-alertcondition(bouncePdlSig,   "PDL bounce",                          "Bounced off the previous day low zone — bullish")
-alertcondition(retestPdlSig,   "PDL break & retest fail",             "Broke PDL and the retest failed — bearish")
-alertcondition(pdhSupSig,      "PDH held as support",                 "Opened above PDH — dip into the zone held, bullish")
-alertcondition(pdlResSig,      "PDL held as resistance",              "Opened below PDL — pop into the zone failed, bearish")
-alertcondition(pmhBreakSig,    "PMH resistance break",                "Broke the pre-market high — calls trigger")
-alertcondition(pmlBreakSig,    "PML support break",                   "Broke the pre-market low — puts trigger")
-alertcondition(revConfBull,    "Reversal confirmed up",               "PDL bounce + bullish 13/48 cross — reversal confirmation")
-alertcondition(revConfBear,    "Reversal confirmed down",             "PDH reject + bearish 13/48 cross — reversal confirmation")
-alertcondition(aboveAllFlipUp, "Bulls take full control",             "Price reclaimed all three EMAs — calls only regime")
-alertcondition(belowAllFlipDn, "Bears take full control",             "Price lost all three EMAs — puts only regime")
+// alert() instead of alertcondition() — alertconditions count toward the
+// 64-output plot limit; alert() calls don't. Set up ONE alert on this
+// indicator with condition "Any alert() function call" to receive all of these.
+if alertsOn
+    sym = syminfo.ticker + ": "
+    if showDips and dip13First
+        alert(sym + "Bullish — first 13 EMA dip of the leg (trend entry zone)", alert.freq_once_per_bar)
+    if showDips and dip13ReAdd
+        alert(sym + "Bullish — second 13 EMA dip (re-add spot if it holds)", alert.freq_once_per_bar)
+    if showDips and dip48Sig
+        alert(sym + "Bullish — deeper pullback into the 48 EMA holding trend", alert.freq_once_per_bar)
+    if showDips and pop13Sig
+        alert(sym + "Bearish — rally into the 13 EMA in a downtrend (short-the-pop zone)", alert.freq_once_per_bar)
+    if showFlags and bullFlagSig
+        alert(sym + "Bull flag micro-break — pullback held the fan, broke prior high", alert.freq_once_per_bar)
+    if showFlags and bearFlagSig
+        alert(sym + "Bear flag micro-break — pop failed at the fan, broke prior low", alert.freq_once_per_bar)
+    if showCross and crossBullSig
+        alert(sym + "Bullish 13/48 EMA cross", alert.freq_once_per_bar)
+    if showCross and crossBearSig
+        alert(sym + "Bearish 13/48 EMA cross — short-term trend shift", alert.freq_once_per_bar)
+    if showCross and revConfBull
+        alert(sym + "REVERSAL CONFIRMED UP — PDL bounce + bullish 13/48 cross", alert.freq_once_per_bar)
+    if showCross and revConfBear
+        alert(sym + "REVERSAL CONFIRMED DOWN — PDH reject + bearish 13/48 cross", alert.freq_once_per_bar)
+    if showLevels and rejectPdhSig
+        alert(sym + "Rejected at the previous day high zone — bearish", alert.freq_once_per_bar)
+    if showLevels and retestPdhSig
+        alert(sym + "PDH break & retest HELD — bullish", alert.freq_once_per_bar)
+    if showLevels and bouncePdlSig
+        alert(sym + "Bounced off the previous day low zone — bullish", alert.freq_once_per_bar)
+    if showLevels and retestPdlSig
+        alert(sym + "PDL break & retest FAILED — bearish", alert.freq_once_per_bar)
+    if showLevels and pdhSupSig
+        alert(sym + "Opened above PDH — dip into the zone held as support, bullish", alert.freq_once_per_bar)
+    if showLevels and pdlResSig
+        alert(sym + "Opened below PDL — pop into the zone failed as resistance, bearish", alert.freq_once_per_bar)
+    if showLevels and pmhBreakSig
+        alert(sym + "Broke the pre-market high — calls trigger", alert.freq_once_per_bar)
+    if showLevels and pmlBreakSig
+        alert(sym + "Broke the pre-market low — puts trigger", alert.freq_once_per_bar)
+    if aboveAllFlipUp
+        alert(sym + "BULLS TAKE FULL CONTROL — price above all 3 EMAs, calls only", alert.freq_once_per_bar)
+    if belowAllFlipDn
+        alert(sym + "BEARS TAKE FULL CONTROL — price below all 3 EMAs, puts only", alert.freq_once_per_bar)

@@ -72,10 +72,12 @@ above 200 EMA) plus a bull-flaggy price-action row, and prints a verdict from
 
 ## Alerts
 
-Every signal above has an `alertcondition`. On the chart: **Alert → Condition →
-this indicator → pick the signal**. Signals only fire on **confirmed bar
-closes** and daily levels use the prior completed session — the indicator does
-not repaint.
+Create **one** alert: chart → Alert → Condition → this indicator → **"Any
+alert() function call"**. Every signal then arrives with a descriptive message
+prefixed by the ticker. Hiding a signal group in the settings also mutes its
+alerts, and the whole thing can be switched off with the "Enable alert()
+events" input. Signals only fire on **confirmed bar closes** and daily levels
+use the prior completed session — the indicator does not repaint.
 
 ## Discipline rules baked into the design
 

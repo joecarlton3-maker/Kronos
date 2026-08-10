@@ -326,8 +326,11 @@ pdlBot = plot(pdShow ? pdl - zoneWL : na, "PDL zone bottom", hidden, style=plot.
 fill(pdhTop, pdhBot, color=color.new(colPD, 85), title="PDH zone")
 fill(pdlTop, pdlBot, color=color.new(colPD, 85), title="PDL zone")
 
-pmhPlot = plot(showPM ? pmHigh : na, "Pre-market high", colPM, 1, plot.style_circles)
-pmlPlot = plot(showPM ? pmLow  : na, "Pre-market low",  colPM, 1, plot.style_circles)
+// Same day-roll break treatment as PDH/PDL — clean flat lines per day,
+// no vertical connectors between days
+pmShow  = showPM and not newDay
+pmhPlot = plot(pmShow ? pmHigh : na, "Pre-market high", colPM, 1, plot.style_linebr)
+pmlPlot = plot(pmShow ? pmLow  : na, "Pre-market low",  colPM, 1, plot.style_linebr)
 fill(pmhPlot, pmlPlot, color=showPM and inChop ? color.new(colPM, 92) : na, title="PMH–PML chop range")
 
 // ─── Signal shapes ───────────────────────────────────────────────────────────

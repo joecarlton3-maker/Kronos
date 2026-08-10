@@ -312,13 +312,17 @@ fill(p13, p48, color=showRibbon ? ribCol : na, title="13/48 momentum ribbon")
 
 bgcolor(showBiasBg ? (bullPts >= 3 ? color.new(#089981, 94) : bearPts >= 3 ? color.new(#f23645, 94) : na) : na, title="Bias tint")
 
-hidden = color.new(color.blue, 100)
-plot(showPD ? pdh : na, "PDH", colPD, 2, plot.style_linebr)
-plot(showPD ? pdl : na, "PDL", colPD, 2, plot.style_linebr)
-pdhTop = plot(showPD ? pdh + zoneWH : na, "PDH zone top",    hidden, editable=false)
-pdhBot = plot(showPD ? pdh - zoneWH : na, "PDH zone bottom", hidden, editable=false)
-pdlTop = plot(showPD ? pdl + zoneWL : na, "PDL zone top",    hidden, editable=false)
-pdlBot = plot(showPD ? pdl - zoneWL : na, "PDL zone bottom", hidden, editable=false)
+// Break the PDH/PDL lines on the bar where the level rolls (linebr breaks on
+// na) — otherwise the plot draws vertical connectors between days' levels,
+// which stack into big rectangles across multi-day charts
+hidden  = color.new(color.blue, 100)
+pdShow  = showPD and not firstRthBar
+plot(pdShow ? pdh : na, "PDH", colPD, 2, plot.style_linebr)
+plot(pdShow ? pdl : na, "PDL", colPD, 2, plot.style_linebr)
+pdhTop = plot(pdShow ? pdh + zoneWH : na, "PDH zone top",    hidden, style=plot.style_linebr, editable=false)
+pdhBot = plot(pdShow ? pdh - zoneWH : na, "PDH zone bottom", hidden, style=plot.style_linebr, editable=false)
+pdlTop = plot(pdShow ? pdl + zoneWL : na, "PDL zone top",    hidden, style=plot.style_linebr, editable=false)
+pdlBot = plot(pdShow ? pdl - zoneWL : na, "PDL zone bottom", hidden, style=plot.style_linebr, editable=false)
 fill(pdhTop, pdhBot, color=color.new(colPD, 85), title="PDH zone")
 fill(pdlTop, pdlBot, color=color.new(colPD, 85), title="PDL zone")
 

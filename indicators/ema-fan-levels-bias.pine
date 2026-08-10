@@ -40,10 +40,9 @@ coolBars   = input.int(6, "Min bars between level signals", minval=0, group=grpS
 grpA     = "Alerts"
 alertsOn = input.bool(true, "Enable alert() events", group=grpA, tooltip="Create ONE TradingView alert on this indicator with condition 'Any alert() function call' and you'll receive every signal below. Signals are gated by their display toggles — hide a signal group to also mute its alerts.")
 
-grpT      = "Table & Background"
+grpT      = "Table"
 showTable = input.bool(true, "Bias checklist table", group=grpT)
 tblPosStr = input.string("Top right", "Table position", options=["Top right", "Top left", "Bottom right", "Bottom left"], group=grpT)
-showBg    = input.bool(true, "Full-control background tint", group=grpT)
 
 // ─── EMA fan ─────────────────────────────────────────────────────────────────
 ema13  = ta.ema(close, len13)
@@ -59,10 +58,25 @@ trendUp  = bullFan and above200
 trendDn  = bearFan and not above200
 
 // ─── Key levels ──────────────────────────────────────────────────────────────
-// [1] offset = previous fully closed daily bar → non-repainting
-[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead=barmerge.lookahead_off)
-
 newDay = timeframe.change("D")
+
+// Previous CASH SESSION high/low, tracked bar-by-bar from regular-hours data
+// only — a daily request.security would include extended hours whenever the
+// chart shows them, which is not what "previous day high/low" means here.
+firstRthBar = session.ismarket and (not session.ismarket[1] or newDay)
+
+var float rthHigh = na
+var float rthLow  = na
+var float pdh     = na
+var float pdl     = na
+if firstRthBar
+    pdh     := rthHigh
+    pdl     := rthLow
+    rthHigh := high
+    rthLow  := low
+else if session.ismarket
+    rthHigh := math.max(nz(rthHigh, high), high)
+    rthLow  := math.min(nz(rthLow, low), low)
 
 var float pmHigh = na
 var float pmLow  = na
@@ -221,8 +235,6 @@ fill(pdlTop, pdlBot, color=color.new(colPD, 85), title="PDL zone")
 
 plot(showPM ? pmHigh : na, "Pre-market high", colPM, 1, plot.style_circles)
 plot(showPM ? pmLow  : na, "Pre-market low",  colPM, 1, plot.style_circles)
-
-bgcolor(showBg and aboveAll ? color.new(#089981, 94) : showBg and belowAll ? color.new(#f23645, 94) : na, title="Full-control tint")
 
 // ─── Signal shapes ───────────────────────────────────────────────────────────
 plotshape(showDips and dip13First, "13 EMA first dip",  shape.triangleup,   location.belowbar, color=col13, text="13 DIP",  textcolor=col13, size=size.tiny)

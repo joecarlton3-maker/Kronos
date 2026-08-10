@@ -23,8 +23,11 @@ File: [`ema-fan-levels-bias.pine`](ema-fan-levels-bias.pine)
 | Yellow / purple / red lines | 13 / 48 / 200 EMAs — the fan |
 | Blue lines with shaded bands | Previous Day High / Low **zones** (width configurable) |
 | Gray dotted lines | Pre-Market High / Low |
-| Green / red background tint | Price above all 3 EMAs (bulls full control) / below all 3 (bears) |
 | Checklist table | Live bullish-bias checklist + verdict |
+
+PDH/PDL are the previous **cash session** (regular trading hours) high/low,
+tracked directly from RTH bars — extended-hours prices never contaminate them,
+whether or not the chart displays extended hours.
 
 ## The bias framework
 
